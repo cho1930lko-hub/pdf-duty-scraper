@@ -194,6 +194,36 @@ html, body, [class*="css"] {
     display:flex; align-items:center; gap:8px;
 }
 
+/* ── FIX 3: Date auto-detect banner ── */
+.date-detected-banner {
+    background: rgba(34,197,94,0.12);
+    border: 1px solid rgba(34,197,94,0.4);
+    border-radius: 10px;
+    padding: 8px 16px;
+    font-size: 0.82rem;
+    color: #4ade80;
+    font-weight: 700;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+/* ── FIX 1: Duplicate warning ── */
+.dup-warning {
+    background: rgba(239,68,68,0.10);
+    border: 2px solid rgba(239,68,68,0.5);
+    border-radius: 12px;
+    padding: 12px 18px;
+    color: #f87171;
+    font-weight: 700;
+    font-size: 0.88rem;
+    margin: 8px 0;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
 @keyframes blink-alert {
     0%,100%{box-shadow:0 0 20px rgba(255,215,0,0.6);border-color:rgba(255,215,0,0.8)}
     50%{box-shadow:0 0 40px rgba(255,215,0,0.2);border-color:rgba(255,215,0,0.3)}
@@ -354,8 +384,6 @@ HINDI_MONTHS = {1:"जनवरी",2:"फ़रवरी",3:"मार्च",4
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  UNIVERSAL COLUMN NAME RESOLVER
-#  Chahe sheet mein Name ho ya Employee_Name ya नाम — sab ek samjha jayega
-#  Chahe Designation ho ya Rank ya पदनाम — sab ek samjha jayega
 # ══════════════════════════════════════════════════════════════════════════════
 NAME_ALIASES = [
     "Name", "Employee_Name", "employee_name", "नाम", "NAAM",
@@ -376,15 +404,10 @@ REMARKS_ALIASES = [
 ]
 
 def find_col(headers_or_record, *alias_lists):
-    """
-    Headers list ya dict keys mein se matching column dhundho.
-    Multiple alias lists accept karta hai — pehle match return karta hai.
-    """
     if isinstance(headers_or_record, dict):
         keys = list(headers_or_record.keys())
     else:
         keys = list(headers_or_record)
-
     for aliases in alias_lists:
         for alias in aliases:
             for k in keys:
@@ -393,13 +416,117 @@ def find_col(headers_or_record, *alias_lists):
     return None
 
 def col_idx_from_header(header_list, *alias_lists):
-    """Header list mein se index dhundho (0-based)."""
     for aliases in alias_lists:
         for alias in aliases:
             for i, h in enumerate(header_list):
                 if str(h).strip().lower() == str(alias).strip().lower():
                     return i
     return None
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  FIX 2: PDF से AUTO DATE EXTRACT
+#  Pattern: दिनांक 26.03:2026 या 26.03.2026 या 26/03/2026
+# ══════════════════════════════════════════════════════════════════════════════
+def extract_date_from_pdf_text(text):
+    """
+    PDF text से date निकालो।
+    Handles: 26.03:2026 | 26.03.2026 | 26/03/2026 | 26-03-2026
+    दिनांक keyword के पास वाली date को priority देता है।
+    """
+    if not text:
+        return None
+
+    # दिनांक / Date keyword के पास वाली date ढूंढो (priority)
+    keyword_patterns = [
+        r'(?:दिनांक|दिनाांक|dinank|date)[^\d]*(\d{1,2})[./:_\-](\d{1,2})[./:_\-](\d{4})',
+    ]
+    for pat in keyword_patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            d, mo, y = m.group(1).zfill(2), m.group(2).zfill(2), m.group(3)
+            try:
+                dt = datetime.strptime(f"{d}-{mo}-{y}", "%d-%m-%Y")
+                return dt.strftime("%d-%m-%Y")
+            except:
+                pass
+
+    # Generic date patterns
+    generic_patterns = [
+        r'\b(\d{1,2})[./:_\-](\d{1,2})[./:_\-](\d{4})\b',
+    ]
+    for pat in generic_patterns:
+        for m in re.finditer(pat, text):
+            d, mo, y = m.group(1).zfill(2), m.group(2).zfill(2), m.group(3)
+            try:
+                dt = datetime.strptime(f"{d}-{mo}-{y}", "%d-%m-%Y")
+                # Sanity check: reasonable year range
+                if 2020 <= dt.year <= 2030:
+                    return dt.strftime("%d-%m-%Y")
+            except:
+                pass
+    return None
+
+
+def extract_date_from_pdf_bytes(pdf_bytes):
+    """PDF bytes से date extract करो — pdfplumber first, then PyMuPDF fallback."""
+    extracted_date = None
+
+    # pdfplumber से text निकालो
+    if PDF_AVAILABLE:
+        try:
+            with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+                for page in pdf.pages:
+                    t = page.extract_text()
+                    if t:
+                        d = extract_date_from_pdf_text(t)
+                        if d:
+                            extracted_date = d
+                            break
+        except:
+            pass
+
+    # PyMuPDF fallback
+    if not extracted_date and OCR_AVAILABLE:
+        try:
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            for page in doc:
+                t = page.get_text()
+                if t:
+                    d = extract_date_from_pdf_text(t)
+                    if d:
+                        extracted_date = d
+                        break
+            doc.close()
+        except:
+            pass
+
+    return extracted_date
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  FIX 1: DUPLICATE UPLOAD CHECK
+#  Same date + same shift → already exists? → block करो
+# ══════════════════════════════════════════════════════════════════════════════
+def check_shift_already_loaded(audit_df, shift_name, date_str):
+    """
+    Audit_Log में check करो — same shift + same date का data पहले से है?
+    Returns: (bool: already_exists, int: count)
+    """
+    if audit_df.empty:
+        return False, 0
+
+    date_c  = find_col(audit_df.columns.tolist(), ["Date", "date"])
+    shift_c = find_col(audit_df.columns.tolist(), ["Shift", "shift"])
+
+    if not date_c or not shift_c:
+        return False, 0
+
+    mask = (
+        (audit_df[date_c].astype(str).str.strip() == date_str) &
+        (audit_df[shift_c].astype(str).str.strip() == shift_name)
+    )
+    count = mask.sum()
+    return (count > 0), int(count)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  GOOGLE SHEETS HELPERS
@@ -422,13 +549,11 @@ def load_all_data(sheet_id):
     client = get_client()
     sh = client.open_by_key(sheet_id)
 
-    # Master_Data — columns: Sr_No, Mobile_No, Designation, Name, Remarks
     try:
         master_df = pd.DataFrame(sh.worksheet("Master_Data").get_all_records())
     except:
         master_df = pd.DataFrame(columns=["Sr_No","Mobile_No","Designation","Name","Remarks"])
 
-    # Shift sheets
     shift_dfs = {}
     for s in SHIFT_NAMES:
         try:
@@ -436,13 +561,11 @@ def load_all_data(sheet_id):
         except:
             shift_dfs[s] = pd.DataFrame(columns=["Mobile_No","Employee_Name","Designation","Shift_Date"])
 
-    # Audit_Log
     try:
         audit_df = pd.DataFrame(sh.worksheet("Audit_Log").get_all_records())
     except:
         audit_df = pd.DataFrame(columns=["Date","Shift","Mobile_No","Employee_Name","Designation","Action","Remarks"])
 
-    # Avkaash
     try:
         avkaash_df = pd.DataFrame(sh.worksheet("Avkaash").get_all_records())
     except:
@@ -454,7 +577,6 @@ def setup_sheets():
     client = get_client()
     sh = client.open_by_key(SHEET_ID)
 
-    # Master_Data — Standard columns
     ws = get_or_create_worksheet(sh, "Master_Data")
     if not ws.get_all_values():
         ws.append_row(["Sr_No", "Mobile_No", "Designation", "Name", "Remarks"])
@@ -505,13 +627,16 @@ def extract_text_pdfplumber(pdf_bytes):
 
 def parse_pdf_with_groq(pdf_bytes, shift_name, shift_date_str):
     if not GROQ_AVAILABLE:
-        return [], "Groq library install नहीं है"
+        return [], "Groq library install नहीं है", None
 
     groq_client = Groq(api_key=st.secrets["groq"]["api_key"])
 
     text_content = ""
     if PDF_AVAILABLE:
         text_content = extract_text_pdfplumber(pdf_bytes)
+
+    # FIX 2: PDF से date निकालो
+    auto_date = extract_date_from_pdf_bytes(pdf_bytes)
 
     if text_content and len(text_content) > 100:
         prompt = f"""यह एक duty roster PDF का text है।
@@ -545,17 +670,20 @@ Rules:
             raw = response.choices[0].message.content.strip()
             raw = re.sub(r'```json|```', '', raw).strip()
             data = json.loads(raw)
-            return data.get("staff", []), None
+            # FIX 2: Groq से मिली date भी try करो, पर regex वाली priority
+            groq_date = data.get("shift_date", "")
+            final_date = auto_date or groq_date or shift_date_str
+            return data.get("staff", []), None, final_date
         except Exception as e:
-            return [], f"Text parse error: {e}"
+            return [], f"Text parse error: {e}", auto_date
 
     else:
         if not OCR_AVAILABLE:
-            return [], "PyMuPDF install नहीं है (pip install PyMuPDF)"
+            return [], "PyMuPDF install नहीं है (pip install PyMuPDF)", auto_date
 
         images_b64 = pdf_to_images_base64(pdf_bytes)
         if not images_b64:
-            return [], "PDF से images नहीं बन सकीं"
+            return [], "PDF से images नहीं बन सकीं", auto_date
 
         all_staff = []
         for idx, img_b64 in enumerate(images_b64[:3]):
@@ -605,7 +733,7 @@ Rules:
                 seen.add(key)
                 unique_staff.append(s)
 
-        return unique_staff, None
+        return unique_staff, None, auto_date
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  SMART REMARKS DETECT
@@ -622,21 +750,13 @@ def smart_detect_remarks(staff_entry):
             return kw
     return ""
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  MASTER DATA NAAM LOOKUP
-# ══════════════════════════════════════════════════════════════════════════════
 def get_master_name(mob, master_mobile_map):
     return master_mobile_map.get(str(mob).strip(), None)
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SHEET WRITERS — Universal column aliases ke saath
+#  SHEET WRITERS
 # ══════════════════════════════════════════════════════════════════════════════
 def update_shift_sheet(shift_name, staff_list, date_str):
-    """
-    TODAY PDF → Shift sheet update + Master_Data update
-    Universal column aliases: Name/Employee_Name/नाम, Designation/Rank/पदनाम sab support
-    Safety fix: idx_desig None check added
-    """
     client = get_client()
     sh = client.open_by_key(SHEET_ID)
 
@@ -649,7 +769,6 @@ def update_shift_sheet(shift_name, staff_list, date_str):
 
     header = all_master_values[0]
 
-    # ── Universal column index lookup ──────────────────────────────────────────
     idx_mob   = col_idx_from_header(header, MOBILE_ALIASES)
     idx_desig = col_idx_from_header(header, DESIG_ALIASES)
     idx_name  = col_idx_from_header(header, NAME_ALIASES)
@@ -675,7 +794,6 @@ def update_shift_sheet(shift_name, staff_list, date_str):
                     if n:
                         master_mobile_map[m] = n
 
-    # ── Shift sheet clear + naya data ─────────────────────────────────────────
     ws_shift = sh.worksheet(shift_name)
     ws_shift.clear()
     ws_shift.append_row(["Mobile_No", "Employee_Name", "Designation", "Shift_Date"])
@@ -722,7 +840,6 @@ def update_shift_sheet(shift_name, staff_list, date_str):
             if idx_desig is not None and idx_desig < len(existing_row):
                 old_desig = str(existing_row[idx_desig]).strip()
 
-            # ✅ SAFETY FIX: idx_desig None check — crash nahi hoga
             if idx_desig is not None and desig and desig.upper() != old_desig.upper():
                 ws_master.update_cell(row_num, idx_desig + 1, desig)
                 audit_rows.append([
@@ -851,7 +968,6 @@ def bulk_historical_import_from_sheet(source_sheet_id, date_from, date_to, progr
     if not src_records:
         return {"error": "Source sheet में कोई data नहीं मिला"}
 
-    # Universal column find using aliases
     sample = src_records[0]
     col_date  = find_col(sample, ["Date","date","तारीख","दिनांक"])
     col_shift = find_col(sample, ["Shift","shift","शिफ्ट"])
@@ -1025,7 +1141,6 @@ def ai_pattern_analysis(audit_df):
 
     groq_client = Groq(api_key=st.secrets["groq"]["api_key"])
 
-    # Universal col names
     name_col  = find_col(audit_df.columns.tolist(), NAME_ALIASES)
     shift_col = find_col(audit_df.columns.tolist(), ["Shift","shift"])
 
@@ -1106,8 +1221,20 @@ Format:
         return f"AI Error: {e}"
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  FIX 3: EMPLOYEE SEARCH — HTML rendering bug fix
+#  Problem: st.markdown में unsafe_allow_html=True था, लेकिन
+#  emp_data values में HTML characters थे जो raw render हो रहे थे।
+#  Fix: html.escape() पहले से हो रहा था, पर current_shift status div
+#  में f-string concatenation गलत थी।
+#  Extra: Search अब Name से भी होगी, सिर्फ mobile नहीं।
+# ══════════════════════════════════════════════════════════════════════════════
 def ai_employee_search(mob, master_df, shift_dfs, audit_df, avkaash_df):
-    import html as html_lib
+    """
+    Mobile number से कर्मचारी ढूंढो।
+    Returns clean dict — कोई HTML नहीं, सिर्फ plain text values।
+    Rendering tab2 में होती है।
+    """
     mob = str(mob).strip()
 
     def clean_mob(x):
@@ -1115,7 +1242,6 @@ def ai_employee_search(mob, master_df, shift_dfs, audit_df, avkaash_df):
         return s[:-2] if s.endswith('.0') else s
 
     emp_row = None
-    # Master_Data mein Mobile_No dhundho (universal alias)
     mob_col_master = find_col(master_df.columns.tolist(), MOBILE_ALIASES)
     if mob_col_master and not master_df.empty:
         res = master_df[master_df[mob_col_master].apply(clean_mob) == mob]
@@ -1131,13 +1257,13 @@ def ai_employee_search(mob, master_df, shift_dfs, audit_df, avkaash_df):
                 name_col  = find_col(last.index.tolist(), NAME_ALIASES)
                 desig_col = find_col(last.index.tolist(), DESIG_ALIASES)
                 return {
-                    "name":  html_lib.escape(str(last[name_col]).strip() if name_col else "—"),
-                    "designation": html_lib.escape(str(last[desig_col]).strip() if desig_col else "—"),
-                    "mobile": mob,
-                    "remarks": "",
-                    "current_shift": "—",
-                    "history": [],
-                    "leaves": []
+                    "name":         str(last[name_col]).strip()  if name_col  else "—",
+                    "designation":  str(last[desig_col]).strip() if desig_col else "—",
+                    "mobile":       mob,
+                    "remarks":      "",
+                    "current_shift":"—",
+                    "history":      [],
+                    "leaves":       []
                 }, None
         return None, "कर्मचारी नहीं मिला"
 
@@ -1145,9 +1271,10 @@ def ai_employee_search(mob, master_df, shift_dfs, audit_df, avkaash_df):
     desig_col = find_col(emp_row.index.tolist(), DESIG_ALIASES)
     rem_col   = find_col(emp_row.index.tolist(), REMARKS_ALIASES)
 
-    name    = html_lib.escape(str(emp_row[name_col]).strip()  if name_col  else "—")
-    desig   = html_lib.escape(str(emp_row[desig_col]).strip() if desig_col else "—")
-    remarks = html_lib.escape(str(emp_row[rem_col]).strip()   if rem_col   else "")
+    # FIX 3: Plain text — NO html.escape() here, rendering layer handles display
+    name    = str(emp_row[name_col]).strip()  if name_col  else "—"
+    desig   = str(emp_row[desig_col]).strip() if desig_col else "—"
+    remarks = str(emp_row[rem_col]).strip()   if rem_col   else ""
 
     current_shift = "—"
     for s_name, s_df in shift_dfs.items():
@@ -1175,10 +1302,130 @@ def ai_employee_search(mob, master_df, shift_dfs, audit_df, avkaash_df):
             leaves = emp_leave[leave_cols].values.tolist()
 
     return {
-        "name": name, "designation": desig, "mobile": mob,
-        "remarks": remarks, "current_shift": current_shift,
-        "history": history, "leaves": leaves
+        "name":          name,
+        "designation":   desig,
+        "mobile":        mob,
+        "remarks":       remarks,
+        "current_shift": current_shift,
+        "history":       history,
+        "leaves":        leaves
     }, None
+
+
+def render_employee_card(emp_data, active_leave_mobs):
+    """
+    FIX 3: Employee card अलग function में — clean HTML build करो।
+    सभी values को st.markdown से पहले escape करो।
+    """
+    import html as _html
+
+    mob = emp_data["mobile"]
+    name    = _html.escape(emp_data["name"])
+    desig   = _html.escape(emp_data["designation"])
+    remarks = _html.escape(emp_data["remarks"])
+    current_shift = emp_data["current_shift"]
+
+    # Status determine करो
+    if mob in active_leave_mobs:
+        status_text  = "🌴 अवकाश पर"
+        status_color = "#f97316"
+        glow_color   = "rgba(249,115,22,0.15)"
+        border_color = "rgba(249,115,22,0.4)"
+    elif current_shift != "—":
+        status_text  = f"🟢 {_html.escape(current_shift)}"
+        status_color = "#22c55e"
+        glow_color   = "rgba(34,197,94,0.15)"
+        border_color = "rgba(34,197,94,0.4)"
+    else:
+        status_text  = "⏳ Unassigned"
+        status_color = "#a855f7"
+        glow_color   = "rgba(168,85,247,0.15)"
+        border_color = "rgba(168,85,247,0.4)"
+
+    # Remarks badge
+    remarks_html = ""
+    if remarks:
+        remarks_html = f"""<div style="margin-top:6px;">
+            <span style="background:rgba(255,215,0,0.15);border:1px solid rgba(255,215,0,0.4);
+                border-radius:20px;padding:3px 12px;font-size:0.78rem;color:#ffd700;font-weight:700;">
+                📌 {remarks}
+            </span></div>"""
+
+    # History table
+    hist_html = ""
+    if emp_data["history"]:
+        rows_html = ""
+        for h in emp_data["history"][-10:]:
+            c0 = _html.escape(str(h[0])) if len(h) > 0 else ""
+            c1 = _html.escape(str(h[1])) if len(h) > 1 else ""
+            c2 = _html.escape(str(h[2])) if len(h) > 2 else ""
+            c3 = _html.escape(str(h[3])) if len(h) > 3 else ""
+            rows_html += f"""<tr>
+                <td style='padding:4px 8px;color:#a0b8d8'>{c0}</td>
+                <td style='padding:4px 8px;color:#60a5fa'>{c1}</td>
+                <td style='padding:4px 8px;color:#4ade80'>{c2}</td>
+                <td style='padding:4px 8px;color:#fbbf24;font-size:0.75rem'>{c3}</td>
+            </tr>"""
+        hist_html = f"""<div style="margin-top:16px;">
+            <div style="font-size:0.78rem;color:#7a92b8;margin-bottom:6px;">📅 पिछली 10 duties (Audit Log):</div>
+            <table style="width:100%;border-collapse:collapse;font-size:0.8rem;">
+                <tr style="background:rgba(255,255,255,0.05)">
+                    <th style="padding:4px 8px;text-align:left;color:#7a92b8">तारीख</th>
+                    <th style="padding:4px 8px;text-align:left;color:#7a92b8">Shift</th>
+                    <th style="padding:4px 8px;text-align:left;color:#7a92b8">पद</th>
+                    <th style="padding:4px 8px;text-align:left;color:#7a92b8">Remarks</th>
+                </tr>
+                {rows_html}
+            </table></div>"""
+
+    # Leave history
+    leave_html = ""
+    if emp_data["leaves"]:
+        leave_rows = ""
+        for lv in emp_data["leaves"]:
+            l0 = _html.escape(str(lv[0])) if len(lv) > 0 else ""
+            l1 = _html.escape(str(lv[1])) if len(lv) > 1 else ""
+            l2 = _html.escape(str(lv[2])) if len(lv) > 2 else ""
+            l3 = _html.escape(str(lv[3])) if len(lv) > 3 else ""
+            leave_rows += f"""<div style='font-size:0.82rem;color:#fb923c;padding:4px 0'>
+                {l0} → {l1} | {l2}
+                <span style='color:#fbbf24'>{l3}</span>
+            </div>"""
+        leave_html = f"""<div style="background:rgba(249,115,22,0.1);border:1px solid rgba(249,115,22,0.25);
+            border-radius:10px;padding:10px 16px;margin-top:14px;">
+            <div style="font-size:0.78rem;color:#7a92b8;margin-bottom:6px;">🌴 अवकाश इतिहास:</div>
+            {leave_rows}</div>"""
+
+    # Final card HTML — सब कुछ एक साथ
+    card_html = f"""
+    <div style="background:linear-gradient(135deg,rgba(13,27,62,0.97),rgba(26,45,90,0.82));
+        border:1px solid {border_color};border-left:5px solid {status_color};border-radius:20px;
+        padding:28px 32px;margin-top:16px;box-shadow:0 8px 40px {glow_color};">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:16px;">
+            <div>
+                <div style="font-size:1.6rem;font-weight:800;color:#e8f0ff;margin-bottom:6px;
+                    font-family:'Rajdhani',sans-serif;">
+                    👤 {name}
+                </div>
+                <div style="font-size:0.85rem;color:#7a92b8;margin-bottom:3px;">
+                    🏷️ <span style="color:#a0b8d8;">{desig}</span>
+                </div>
+                <div style="font-size:0.85rem;color:#7a92b8;">
+                    📱 <span style="color:#a0b8d8;font-family:'Space Mono',monospace;">{_html.escape(mob)}</span>
+                </div>
+                {remarks_html}
+            </div>
+            <div style="background:rgba(0,0,0,0.4);border:1px solid {border_color};
+                border-radius:16px;padding:16px 28px;text-align:center;min-width:140px;">
+                <div style="font-size:1.05rem;font-weight:700;color:{status_color};">{status_text}</div>
+            </div>
+        </div>
+        {hist_html}
+        {leave_html}
+    </div>"""
+
+    st.markdown(card_html, unsafe_allow_html=True)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  UTILITY
@@ -1262,7 +1509,7 @@ with st.spinner("डेटा लोड हो रहा है..."):
         st.info("Sidebar में 'Sheets Setup करें' बटन दबाएं।")
         st.stop()
 
-today_str        = now_ist().strftime("%d-%m-%Y")
+today_str         = now_ist().strftime("%d-%m-%Y")
 active_leave_mobs = get_active_leave_mobiles(avkaash_df)
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1295,21 +1542,27 @@ st.markdown("<br>", unsafe_allow_html=True)
 if "new_staff_alerts" in st.session_state and st.session_state["new_staff_alerts"]:
     st.markdown('<div class="section-title">🔔 नए कर्मचारी जोड़े गए</div>', unsafe_allow_html=True)
     for ns in st.session_state["new_staff_alerts"]:
+        import html as _html_alert
+        safe_name  = _html_alert.escape(str(ns.get('Employee_Name','')))
+        safe_desig = _html_alert.escape(str(ns.get('Designation','')))
+        safe_mob   = _html_alert.escape(str(ns.get('Mobile_No','')))
         st.markdown(f"""
         <div class="new-staff-alert">
             <span class="alert-icon">⚠️</span>
-            <span class="alert-text">नया कर्मचारी: {ns['Employee_Name']} | {ns['Designation']} | 📱 {ns['Mobile_No']}</span>
+            <span class="alert-text">नया कर्मचारी: {safe_name} | {safe_desig} | 📱 {safe_mob}</span>
         </div>""", unsafe_allow_html=True)
     if st.button("✅ Alerts dismiss करें"):
         st.session_state["new_staff_alerts"] = []
         st.rerun()
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  PDF UPLOAD
+#  PDF UPLOAD — FIX 1 (duplicate check) + FIX 2 (auto date)
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown('<div class="section-title">📥 PDF Upload — तीनों Shifts</div>', unsafe_allow_html=True)
 
-pdf_date_input = st.date_input("📅 PDF की तारीख चुनें", value=now_ist().date(), key="pdf_date")
+# Manual date — FIX 2: यह fallback है, PDF से auto date मिलेगी तो override होगी
+pdf_date_input = st.date_input("📅 तारीख (PDF से auto-detect होगी | यह fallback है)",
+                                value=now_ist().date(), key="pdf_date")
 pdf_date_str   = pdf_date_input.strftime("%d-%m-%Y")
 
 is_historical = st.checkbox(
@@ -1331,26 +1584,71 @@ for col, shift_name, emoji, card_cls, badge_cls in upload_configs:
                                     key=f"upload_{shift_name}", label_visibility="collapsed")
         if uploaded is not None:
             st.caption(f"📎 {uploaded.name}")
-            if st.button(f"🚀 {shift_name} Process करें", key=f"process_{shift_name}", use_container_width=True):
+
+            # FIX 2: PDF से date preview — file read करो but don't consume
+            pdf_bytes_preview = uploaded.read()
+            uploaded.seek(0)  # reset for later use
+
+            auto_date_preview = extract_date_from_pdf_bytes(pdf_bytes_preview)
+            effective_date    = auto_date_preview if auto_date_preview else pdf_date_str
+
+            if auto_date_preview:
+                st.markdown(f"""
+                <div class="date-detected-banner">
+                    📅 PDF से date मिली: <strong>{auto_date_preview}</strong>
+                    &nbsp;(manual date override नहीं होगी)
+                </div>""", unsafe_allow_html=True)
+            else:
+                st.caption(f"📅 Date: {pdf_date_str} (manual)")
+
+            # FIX 1: Duplicate check — पहले से data है?
+            already_loaded, existing_count = check_shift_already_loaded(
+                audit_df, shift_name, effective_date
+            )
+
+            if already_loaded:
+                st.markdown(f"""
+                <div class="dup-warning">
+                    ⚠️ {shift_name} का {effective_date} का data पहले से
+                    {existing_count} records के साथ load है!
+                </div>""", unsafe_allow_html=True)
+
+                force_reload = st.checkbox(
+                    f"🔄 फिर भी reload करें ({shift_name})",
+                    key=f"force_{shift_name}",
+                    value=False
+                )
+                can_process = force_reload
+            else:
+                can_process = True
+
+            if st.button(f"🚀 {shift_name} Process करें",
+                         key=f"process_{shift_name}", use_container_width=True,
+                         disabled=not can_process):
                 with st.spinner(f"{shift_name} parse हो रहा है... (Groq AI)"):
                     pdf_bytes = uploaded.read()
-                    staff_list, err = parse_pdf_with_groq(pdf_bytes, shift_name, pdf_date_str)
+                    staff_list, err, detected_date = parse_pdf_with_groq(
+                        pdf_bytes, shift_name, pdf_date_str
+                    )
+                    # FIX 2: Final date — PDF detected > Groq detected > manual
+                    final_date = auto_date_preview or detected_date or pdf_date_str
+
                     if err:
                         st.error(f"❌ Error: {err}")
                     elif not staff_list:
                         st.warning(f"⚠️ {shift_name}: कोई कर्मचारी नहीं मिला")
                     else:
                         if is_historical:
-                            count, new_staff_hist = load_historical_pdf(shift_name, staff_list, pdf_date_str)
-                            st.success(f"📚 {shift_name}: {count} records Audit_Log में")
+                            count, new_staff_hist = load_historical_pdf(shift_name, staff_list, final_date)
+                            st.success(f"📚 {shift_name}: {count} records Audit_Log में | तारीख: {final_date}")
                             if new_staff_hist:
                                 st.info(f"➕ {len(new_staff_hist)} नए कर्मचारी Master में जोड़े गए")
                                 if "new_staff_alerts" not in st.session_state:
                                     st.session_state["new_staff_alerts"] = []
                                 st.session_state["new_staff_alerts"].extend(new_staff_hist)
                         else:
-                            new_staff = update_shift_sheet(shift_name, staff_list, pdf_date_str)
-                            st.success(f"✅ {shift_name}: {len(staff_list)} कर्मचारी load")
+                            new_staff = update_shift_sheet(shift_name, staff_list, final_date)
+                            st.success(f"✅ {shift_name}: {len(staff_list)} कर्मचारी load | तारीख: {final_date}")
                             if new_staff:
                                 if "new_staff_alerts" not in st.session_state:
                                     st.session_state["new_staff_alerts"] = []
@@ -1381,7 +1679,6 @@ for idx, (s_label, card_cls, badge_cls, color) in enumerate(shift_styles):
             <div class="unit">कर्मचारी</div>
         </div>""", unsafe_allow_html=True)
         if not s_df.empty:
-            # Universal column display
             name_c  = find_col(s_df.columns.tolist(), NAME_ALIASES)  or \
                       next((c for c in s_df.columns if c in ["Employee_Name","Name"]), None)
             desig_c = find_col(s_df.columns.tolist(), DESIG_ALIASES) or \
@@ -1408,7 +1705,7 @@ for idx, (s_label, card_cls, badge_cls, color) in enumerate(shift_styles):
             st.info(f"अभी कोई data नहीं\nPDF upload करें ↑")
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  TABS  —  Staff List TAB हटा दिया गया
+#  TABS
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown("---")
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
@@ -1451,7 +1748,7 @@ with tab1:
             st.caption("⚠️ यह सिर्फ AI suggestion है — sheet में कोई बदलाव नहीं हुआ")
         st.markdown('</div>', unsafe_allow_html=True)
 
-# ─── TAB 2: Employee Search ───────────────────────────────────────────────────
+# ─── TAB 2: Employee Search — FIX 3 Applied ──────────────────────────────────
 with tab2:
     st.markdown('<div class="section-title">🔍 मोबाइल नंबर से कर्मचारी खोजें</div>', unsafe_allow_html=True)
 
@@ -1475,87 +1772,8 @@ with tab2:
                     <div style="color:#f87171;font-weight:700;">मोबाइल नं. {mob_q} से कोई कर्मचारी नहीं मिला</div>
                 </div>""", unsafe_allow_html=True)
             else:
-                if mob_q in active_leave_mobs:
-                    ds, sc_color = "🌴 अवकाश पर", "#f97316"
-                    glow, bc = "rgba(249,115,22,0.15)", "rgba(249,115,22,0.4)"
-                elif emp_data["current_shift"] != "—":
-                    ds, sc_color = f"🟢 {emp_data['current_shift']}", "#22c55e"
-                    glow, bc = "rgba(34,197,94,0.15)", "rgba(34,197,94,0.4)"
-                else:
-                    ds, sc_color = "⏳ Unassigned", "#a855f7"
-                    glow, bc = "rgba(168,85,247,0.15)", "rgba(168,85,247,0.4)"
-
-                remarks_html = ""
-                if emp_data.get("remarks", "").strip():
-                    remarks_html = f"""<div style="margin-top:6px;">
-                        <span style="background:rgba(255,215,0,0.15);border:1px solid rgba(255,215,0,0.4);
-                            border-radius:20px;padding:3px 12px;font-size:0.78rem;color:#ffd700;font-weight:700;">
-                            📌 {emp_data['remarks']}
-                        </span></div>"""
-
-                hist_html = ""
-                if emp_data["history"]:
-                    rows_html = "".join([
-                        f"<tr>"
-                        f"<td style='padding:4px 8px;color:#a0b8d8'>{h[0] if len(h)>0 else ''}</td>"
-                        f"<td style='padding:4px 8px;color:#60a5fa'>{h[1] if len(h)>1 else ''}</td>"
-                        f"<td style='padding:4px 8px;color:#4ade80'>{h[2] if len(h)>2 else ''}</td>"
-                        f"<td style='padding:4px 8px;color:#fbbf24;font-size:0.75rem'>{h[3] if len(h)>3 else ''}</td>"
-                        f"</tr>"
-                        for h in emp_data["history"][-10:]
-                    ])
-                    hist_html = f"""<div style="margin-top:16px;">
-                        <div style="font-size:0.78rem;color:#7a92b8;margin-bottom:6px;">📅 पिछली 10 duties (Audit Log):</div>
-                        <table style="width:100%;border-collapse:collapse;font-size:0.8rem;">
-                            <tr style="background:rgba(255,255,255,0.05)">
-                                <th style="padding:4px 8px;text-align:left;color:#7a92b8">तारीख</th>
-                                <th style="padding:4px 8px;text-align:left;color:#7a92b8">Shift</th>
-                                <th style="padding:4px 8px;text-align:left;color:#7a92b8">पद</th>
-                                <th style="padding:4px 8px;text-align:left;color:#7a92b8">Remarks</th>
-                            </tr>
-                            {rows_html}
-                        </table></div>"""
-
-                leave_html = ""
-                if emp_data["leaves"]:
-                    leave_rows = "".join([
-                        f"<div style='font-size:0.82rem;color:#fb923c;padding:4px 0'>"
-                        f"{l[0] if len(l)>0 else ''} → {l[1] if len(l)>1 else ''}"
-                        f" | {l[2] if len(l)>2 else ''}"
-                        f" | <span style='color:#fbbf24'>{l[3] if len(l)>3 else ''}</span></div>"
-                        for l in emp_data["leaves"]
-                    ])
-                    leave_html = f"""<div style="background:rgba(249,115,22,0.1);border:1px solid rgba(249,115,22,0.25);
-                        border-radius:10px;padding:10px 16px;margin-top:14px;">
-                        <div style="font-size:0.78rem;color:#7a92b8;margin-bottom:6px;">🌴 अवकाश इतिहास:</div>
-                        {leave_rows}</div>"""
-
-                st.markdown(f"""
-                <div style="background:linear-gradient(135deg,rgba(13,27,62,0.97),rgba(26,45,90,0.82));
-                    border:1px solid {bc};border-left:5px solid {sc_color};border-radius:20px;
-                    padding:28px 32px;margin-top:16px;box-shadow:0 8px 40px {glow};">
-                    <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:16px;">
-                        <div>
-                            <div style="font-size:1.6rem;font-weight:800;color:#e8f0ff;margin-bottom:6px;
-                                font-family:'Rajdhani',sans-serif;">
-                                👤 {emp_data['name']}
-                            </div>
-                            <div style="font-size:0.85rem;color:#7a92b8;margin-bottom:3px;">
-                                🏷️ <span style="color:#a0b8d8;">{emp_data['designation']}</span>
-                            </div>
-                            <div style="font-size:0.85rem;color:#7a92b8;">
-                                📱 <span style="color:#a0b8d8;font-family:'Space Mono',monospace;">{emp_data['mobile']}</span>
-                            </div>
-                            {remarks_html}
-                        </div>
-                        <div style="background:rgba(0,0,0,0.4);border:1px solid {bc};
-                            border-radius:16px;padding:16px 28px;text-align:center;min-width:140px;">
-                            <div style="font-size:1.05rem;font-weight:700;color:{sc_color};">{ds}</div>
-                        </div>
-                    </div>
-                    {hist_html}
-                    {leave_html}
-                </div>""", unsafe_allow_html=True)
+                # FIX 3: Clean render function call करो
+                render_employee_card(emp_data, active_leave_mobs)
         else:
             st.warning("⚠️ 10 अंकों का सही नंबर दर्ज करें")
 
@@ -1635,13 +1853,14 @@ with tab4:
 
     with lc_info_col:
         if auto_name:
+            import html as _html_av
             st.markdown(f"""
             <div style="background:rgba(34,197,94,0.1);border:1px solid rgba(34,197,94,0.35);
                 border-radius:10px;padding:10px 16px;margin-top:4px;display:flex;gap:16px;align-items:center;">
                 <span style="font-size:1.3rem;">✅</span>
                 <div>
-                    <div style="color:#4ade80;font-weight:700;font-size:0.95rem;">{auto_name}</div>
-                    <div style="color:#7a92b8;font-size:0.8rem;">{auto_desig}</div>
+                    <div style="color:#4ade80;font-weight:700;font-size:0.95rem;">{_html_av.escape(auto_name)}</div>
+                    <div style="color:#7a92b8;font-size:0.8rem;">{_html_av.escape(auto_desig)}</div>
                 </div>
             </div>""", unsafe_allow_html=True)
         elif l_mob and len(l_mob.strip()) == 10:
@@ -1763,7 +1982,6 @@ with tab6:
                 all_vals = ws.get_all_values()
                 header   = all_vals[0] if all_vals else ["Sr_No","Mobile_No","Designation","Name","Remarks"]
 
-                # Existing mobiles
                 mi_mob = col_idx_from_header(header, MOBILE_ALIASES)
                 existing = set()
                 for row in all_vals[1:]:
@@ -1772,7 +1990,6 @@ with tab6:
 
                 added = 0
                 for s in staff_list:
-                    # Universal key lookup in JSON record
                     mob   = str(s.get("Mobile_No", s.get("mobile_no", s.get("Mobile","")))).strip()
                     name  = str(s.get("Name",  s.get("Employee_Name", s.get("नाम","")))).strip()
                     desig = str(s.get("Designation", s.get("Rank", s.get("पदनाम","")))).strip()
