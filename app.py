@@ -1188,19 +1188,25 @@ Format:
 
 
 def ai_employee_search(mob, master_df, shift_dfs, audit_df, avkaash_df):
-    """Mobile number से complete employee card"""
     mob = str(mob).strip()
 
-    # Master से basic info
     emp_row = None
     if not master_df.empty and "Mobile_No" in master_df.columns:
-        res = master_df[master_df["Mobile_No"].astype(str).str.strip() == mob]
+        # Integer issue fix — .0 हटाओ
+        def clean_mob(x):
+            s = str(x).strip()
+            if s.endswith('.0'):
+                s = s[:-2]
+            return s
+        
+        res = master_df[master_df["Mobile_No"].apply(clean_mob) == mob]
         if not res.empty:
             emp_row = res.iloc[0]
 
     if emp_row is None:
         return None, "कर्मचारी नहीं मिला"
-
+    
+    # बाकी code same रहेगा...
     # Master columns: Sr_No, Mobile_No, Designation, Name, Remarks
     # "Name" or "Employee_Name" — दोनों handle करो
     name  = str(emp_row.get("Name", emp_row.get("Employee_Name", "—"))).strip()
