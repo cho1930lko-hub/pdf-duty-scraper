@@ -737,10 +737,9 @@ def update_shift_sheet(shift_name, staff_list, date_str):
 
             old_desig = str(existing_row[idx_desig]).strip() if idx_desig is not None and idx_desig < len(existing_row) else ""
 
-            if desig and desig.upper() != old_desig.upper():
-                # Designation update करो
-                col_letter = chr(ord('A') + idx_desig)  # A=0, B=1, C=2...
-                ws_master.update_cell(row_num, idx_desig + 1, desig)  # gspread 1-based
+            if idx_desig is not None:
+                col_letter = chr(ord('A') + int(idx_desig))
+                ws_master.update_cell(row_num, int(idx_desig) + 1, desig)
                 audit_rows.append([
                     date_str, shift_name, mob, name, desig,
                     "Designation_Updated",
