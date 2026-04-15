@@ -101,19 +101,14 @@ html, body, [class*="css"] {
 /* ══ MAGIC HEADER ══ */
 .magic-header-wrap {
     position: relative; margin-bottom: 32px;
-    border-radius: 20px; padding: 3px; overflow: visible;
+    border-radius: 20px; padding: 3px; overflow: hidden;
+    background: linear-gradient(135deg, rgba(0,212,255,0.3), rgba(46,117,182,0.4), rgba(255,215,0,0.2), rgba(0,212,255,0.3));
+    background-size: 300% 300%;
+    animation: gradient-shift 8s ease infinite;
 }
-.magic-header-wrap::before {
-    content: ''; position: absolute; inset: -2px; border-radius: 22px;
-    background: conic-gradient(from var(--angle,0deg),#ff0080,#ff6b00,#ffd700,#00ff88,#00cfff,#7f5fff,#ff0080);
-    animation: spin-border 5s linear infinite; z-index: 0;
+@keyframes gradient-shift {
+    0%{background-position:0% 50%} 50%{background-position:100% 50%} 100%{background-position:0% 50%}
 }
-.magic-header-wrap::after {
-    content: ''; position: absolute; inset: -20px; border-radius: 32px;
-    background: conic-gradient(from 0deg,#ff008055,#00cfff55,#7f5fff55,#ff008055);
-    animation: spin-border 5s linear infinite; filter: blur(24px); z-index: -1; opacity: 0.7;
-}
-@keyframes spin-border { 0%{transform:rotate(0deg)} 100%{transform:rotate(360deg)} }
 .magic-header-inner {
     position: relative; z-index: 1;
     background: linear-gradient(135deg, #0d1b3e 0%, #132448 30%, #1a2d5a 60%, #0d1b3e 100%);
@@ -392,6 +387,12 @@ def load_all_data(sheet_id):
     client = get_client()
     sh = client.open_by_key(sheet_id)
 
+    # Staff_list — आपकी original sheet
+    try:
+        staff_list_df = pd.DataFrame(sh.worksheet("Staff_list").get_all_records())
+    except:
+        staff_list_df = pd.DataFrame(columns=["Mobile_No","Employee_Name","Rank","REMARK","STATUS"])
+
     # Master_Data — columns: Sr_No, Mobile_No, Designation, Name, Remarks
     try:
         master_df = pd.DataFrame(sh.worksheet("Master_Data").get_all_records())
@@ -418,12 +419,17 @@ def load_all_data(sheet_id):
     except:
         avkaash_df = pd.DataFrame(columns=["Mobile_No","Designation","Name","Leave_From","Leave_To","Leave_Reason","Sd_Days","Status"])
 
-    return master_df, shift_dfs, audit_df, avkaash_df
+    return master_df, shift_dfs, audit_df, avkaash_df, staff_list_df
 
 def setup_sheets():
     """पहली बार sheets और headers बनाएं"""
     client = get_client()
     sh = client.open_by_key(SHEET_ID)
+
+    # Staff_list — columns: Mobile_No, Employee_Name, Rank, REMARK, STATUS
+    ws = get_or_create_worksheet(sh, "Staff_list")
+    if not ws.get_all_values():
+        ws.append_row(["Mobile_No", "Employee_Name", "Rank", "REMARK", "STATUS"])
 
     # Master_Data — columns: Sr_No, Mobile_No, Designation, Name, Remarks
     ws = get_or_create_worksheet(sh, "Master_Data")
@@ -760,6 +766,32 @@ def update_shift_sheet(shift_name, staff_list, date_str):
     ws_audit = get_or_create_worksheet(sh, "Audit_Log")
     if audit_rows:
         ws_audit.append_rows(audit_rows)
+
+    # ── Staff_list में नए कर्मचारी जोड़ो (Mobile_No, Employee_Name, Rank, REMARK, STATUS) ──
+    # सिर्फ वो जो नए हैं (new_staff list में हैं)
+    try:
+        ws_staff = get_or_create_worksheet(sh, "Staff_list")
+        staff_all_vals = ws_staff.get_all_values()
+        # Header check
+        if not staff_all_vals:
+            ws_staff.append_row(["Mobile_No", "Employee_Name", "Rank", "REMARK", "STATUS"])
+            staff_all_vals = [["Mobile_No", "Employee_Name", "Rank", "REMARK", "STATUS"]]
+        # existing mobiles in Staff_list
+        existing_staff_mobs = set(str(r[0]).strip() for r in staff_all_vals[1:] if r)
+        staff_new_rows = []
+        for ns in new_staff:
+            if str(ns.get("Mobile_No","")).strip() not in existing_staff_mobs:
+                staff_new_rows.append([
+                    ns.get("Mobile_No",""),
+                    ns.get("Employee_Name",""),
+                    ns.get("Designation",""),  # Rank
+                    "",   # REMARK
+                    "1",  # STATUS default 1
+                ])
+        if staff_new_rows:
+            ws_staff.append_rows(staff_new_rows)
+    except Exception as _e:
+        pass  # Staff_list update optional
 
     load_all_data.clear()
     return new_staff
@@ -1281,7 +1313,7 @@ with st.sidebar:
 # ══════════════════════════════════════════════════════════════════════════════
 with st.spinner("डेटा लोड हो रहा है..."):
     try:
-        master_df, shift_dfs, audit_df, avkaash_df = load_all_data(SHEET_ID)
+        master_df, shift_dfs, audit_df, avkaash_df, staff_list_df = load_all_data(SHEET_ID)
     except Exception as e:
         st.error(f"❌ Sheet connect नहीं हुई: {e}")
         st.info("Sidebar में 'Sheets Setup करें' बटन दबाएं।")
@@ -1437,10 +1469,11 @@ for idx, (s_label, card_cls, badge_cls, color) in enumerate(shift_styles):
 #  TABS
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown("---")
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "🤖 AI Analysis",
     "🔍 कर्मचारी खोज",
     "👥 Master Data",
+    "📋 Staff List",
     "🌴 अवकाश",
     "📜 Audit Log",
     "➕ कर्मचारी जोड़ें",
@@ -1622,8 +1655,33 @@ with tab3:
                 use_container_width=True)
         st.caption(f"कुल: {len(disp)} कर्मचारी")
 
-# ─── TAB 4: Avkaash ───────────────────────────────────────────────────────────
+# ─── TAB 4: Staff List ────────────────────────────────────────────────────────
 with tab4:
+    st.markdown('<div class="section-title">📋 Staff List — Mobile_No | Employee_Name | Rank | REMARK | STATUS</div>', unsafe_allow_html=True)
+    st.caption("यह आपकी original Staff_list sheet का data है। PDF से नए कर्मचारी यहाँ नीचे जुड़ते हैं।")
+    if staff_list_df.empty:
+        st.info("Staff_list sheet खाली है या connect नहीं हो पाई।")
+    else:
+        sl_search = st.text_input("🔍 नाम / मोबाइल / Rank खोजें", placeholder="खोजें...", key="sl_search")
+        disp_sl = staff_list_df.copy()
+        if sl_search:
+            mask = pd.Series([False]*len(disp_sl), index=disp_sl.index)
+            for col in ["Mobile_No","Employee_Name","Rank","REMARK","STATUS"]:
+                if col in disp_sl.columns:
+                    mask |= disp_sl[col].astype(str).str.contains(sl_search, case=False, na=False)
+            disp_sl = disp_sl[mask]
+        st.dataframe(disp_sl, use_container_width=True, hide_index=True, height=420)
+        sl1, _ = st.columns([1,3])
+        with sl1:
+            st.download_button("⬇️ Staff List Excel",
+                data=df_to_excel_bytes(disp_sl, "Staff_list"),
+                file_name=f"Staff_list_{today_str}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True)
+        st.caption(f"कुल: {len(disp_sl)} कर्मचारी")
+
+# ─── TAB 5: Avkaash ───────────────────────────────────────────────────────────
+with tab5:
     st.markdown('<div class="section-title">🌴 अवकाश प्रबंधन</div>', unsafe_allow_html=True)
 
     if not avkaash_df.empty:
@@ -1668,8 +1726,8 @@ with tab4:
         else:
             st.warning("मोबाइल नं. और नाम ज़रूरी है।")
 
-# ─── TAB 5: Audit Log ─────────────────────────────────────────────────────────
-with tab5:
+# ─── TAB 6: Audit Log ─────────────────────────────────────────────────────────
+with tab6:
     st.markdown('<div class="section-title">📜 Audit Log — सम्पूर्ण इतिहास</div>', unsafe_allow_html=True)
 
     if audit_df.empty:
@@ -1703,8 +1761,8 @@ with tab5:
                 use_container_width=True)
         st.caption(f"कुल records: {len(a_df)}")
 
-# ─── TAB 6: Add Employee ──────────────────────────────────────────────────────
-with tab6:
+# ─── TAB 7: Add Employee ──────────────────────────────────────────────────────
+with tab7:
     st.markdown('<div class="section-title">➕ नया कर्मचारी जोड़ें (Manual)</div>', unsafe_allow_html=True)
     st.caption("Master Data columns: Sr_No | Mobile_No | Designation | Name | Remarks")
 
@@ -1770,8 +1828,8 @@ with tab6:
         else:
             st.warning("JSON paste करें।")
 
-# ─── TAB 7: Bulk Historical Import ───────────────────────────────────────────
-with tab7:
+# ─── TAB 8: Bulk Historical Import ───────────────────────────────────────────
+with tab8:
     st.markdown('<div class="section-title">📂 Bulk Historical Import — Google Sheet से सीधे</div>', unsafe_allow_html=True)
     st.caption("01 मार्च से अब तक का पुराना data एक बार में Audit_Log में डालें + नए कर्मचारी Master में जुड़ेंगे")
 
