@@ -645,44 +645,55 @@ Rules:
 # ══════════════════════════════════════════════════════════════════════════════
 #  SHEET WRITERS
 # ══════════════════════════════════════════════════════════════════════════════
+def smart_detect_remarks(staff_entry):
+    """
+    PDF ke kisi bhi column mein CHO / Shift Incharge / Inspector etc dhundho.
+    Milne par wahi return karo, nahi mila to "" (blank).
+    """
+    REMARK_KEYWORDS = [
+        "CHO", "Shift Incharge", "Shift In-charge", "Incharge",
+        "Inspector", "SI", "ASI", "HC", "Constable", "Head Constable",
+        "Sub Inspector", "CFMC", "Deputation", "इन्चार्ज", "प्रभारी"
+    ]
+    # सभी values मिलाओ
+    all_text = " ".join(str(v) for v in staff_entry.values())
+    for kw in REMARK_KEYWORDS:
+        if kw.lower() in all_text.lower():
+            return kw
+    return ""
+
+
+def get_master_name(mob, master_mobile_map):
+    """
+    Master_Data से mobile ke saath sahi naam lo.
+    Nahi mila to None return karo (PDF wala naam use hoga).
+    """
+    return master_mobile_map.get(str(mob).strip(), None)
+
+
 def update_shift_sheet(shift_name, staff_list, date_str):
     """
-    TODAY PDF → Shift sheet update + Master_Data में:
-      - नया mobile मिले → add करो (alert के साथ)
-      - पुराना mobile मिले + designation बदली हो → update करो
+    TODAY PDF → Shift sheet update + Master_Data mein:
+      - Mobile se Master_Data mein naam dhundho → wahi naam use karo (spelling fix)
+      - Naya mobile mile → add karo (alert ke saath)
+      - Purana mobile mile + designation badli ho → update karo
+      - Remarks: smart detect (CHO/Shift Incharge etc), nahi mila to blank
     Master columns: Sr_No, Mobile_No, Designation, Name, Remarks
-    Returns: new_staff_list (नए कर्मचारी जो Master में नहीं थे)
+    Returns: new_staff_list (naye karmchari jo Master mein nahi the)
     """
     client = get_client()
     sh = client.open_by_key(SHEET_ID)
 
-    # ── Shift sheet clear + नया data ──────────────────────────────────────────
-    ws_shift = sh.worksheet(shift_name)
-    ws_shift.clear()
-    ws_shift.append_row(["Mobile_No", "Employee_Name", "Designation", "Shift_Date"])
-
-    rows = []
-    for s in staff_list:
-        mob  = str(s.get("Mobile_No", "")).strip()
-        name = str(s.get("Employee_Name", "")).strip()
-        desig = str(s.get("Designation", "")).strip()
-        if name:
-            rows.append([mob, name, desig, date_str])
-    if rows:
-        ws_shift.append_rows(rows)
-
-    # ── Master_Data — सभी rows + header पढ़ो ──────────────────────────────────
+    # ── Master_Data pehle padho (naam lookup ke liye) ─────────────────────────
     ws_master = sh.worksheet("Master_Data")
-    all_master_values = ws_master.get_all_values()  # raw rows (list of lists)
+    all_master_values = ws_master.get_all_values()
 
-    # Header row (पहली row) — अगर खाली हो तो बनाओ
     if not all_master_values:
         ws_master.append_row(["Sr_No", "Mobile_No", "Designation", "Name", "Remarks"])
         all_master_values = [["Sr_No", "Mobile_No", "Designation", "Name", "Remarks"]]
 
-    header = all_master_values[0]  # ["Sr_No", "Mobile_No", "Designation", "Name", "Remarks"]
+    header = all_master_values[0]
 
-    # Column indexes ढूंढो (case-insensitive)
     def col_idx(headers, *names):
         for n in names:
             for i, h in enumerate(headers):
@@ -696,7 +707,6 @@ def update_shift_sheet(shift_name, staff_list, date_str):
     idx_srno  = col_idx(header, "Sr_No", "sr_no", "क्र०स०", "srno")
     idx_rem   = col_idx(header, "Remarks", "remarks", "REMARKS")
 
-    # अगर columns नहीं मिले — header fix करो
     if idx_mob is None:
         ws_master.clear()
         ws_master.append_row(["Sr_No", "Mobile_No", "Designation", "Name", "Remarks"])
@@ -704,93 +714,97 @@ def update_shift_sheet(shift_name, staff_list, date_str):
         header = all_master_values[0]
         idx_srno, idx_mob, idx_desig, idx_name, idx_rem = 0, 1, 2, 3, 4
 
-    # Mobile → row_index map बनाओ (1-based, row 1 = header)
-    # key = mobile string, value = sheet row number (1-based)
-    mobile_to_row = {}
-    for row_i, row in enumerate(all_master_values[1:], start=2):  # row 2 onwards
+    # Mobile → naam map (Master_Data se)
+    master_mobile_map = {}  # {mobile_str: naam_str}
+    mobile_to_row = {}      # {mobile_str: row_number_1based}
+    for row_i, row in enumerate(all_master_values[1:], start=2):
         if idx_mob is not None and idx_mob < len(row):
             m = str(row[idx_mob]).strip()
             if m:
                 mobile_to_row[m] = row_i
+                if idx_name is not None and idx_name < len(row):
+                    n = str(row[idx_name]).strip()
+                    if n:
+                        master_mobile_map[m] = n
+
+    # ── Shift sheet clear + naya data ─────────────────────────────────────────
+    ws_shift = sh.worksheet(shift_name)
+    ws_shift.clear()
+    ws_shift.append_row(["Mobile_No", "Employee_Name", "Designation", "Shift_Date"])
+
+    rows = []
+    for s in staff_list:
+        mob   = str(s.get("Mobile_No", "")).strip()
+        pdf_name = str(s.get("Employee_Name", "")).strip()
+        desig = str(s.get("Designation", "")).strip()
+        # Master se sahi naam lo, nahi mila to PDF wala naam
+        master_naam = get_master_name(mob, master_mobile_map)
+        final_name = master_naam if master_naam else pdf_name
+        if final_name:
+            rows.append([mob, final_name, desig, date_str])
+    if rows:
+        ws_shift.append_rows(rows)
 
     new_staff   = []
     audit_rows  = []
-    next_sr     = len(all_master_values)  # Sr_No के लिए
+    next_sr     = len(all_master_values)
 
     for s in staff_list:
-        mob   = str(s.get("Mobile_No", "")).strip()
-        name  = str(s.get("Employee_Name", "")).strip()
-        desig = str(s.get("Designation", "")).strip()
+        mob      = str(s.get("Mobile_No", "")).strip()
+        pdf_name = str(s.get("Employee_Name", "")).strip()
+        desig    = str(s.get("Designation", "")).strip()
 
-        if not name:
+        # Master se sahi naam
+        master_naam = get_master_name(mob, master_mobile_map)
+        final_name  = master_naam if master_naam else pdf_name
+
+        if not final_name:
             continue
 
-        audit_rows.append([date_str, shift_name, mob, name, desig, "Loaded", "PDF से लोड"])
+        # Smart remarks detect
+        auto_remark = smart_detect_remarks(s)
+
+        audit_rows.append([date_str, shift_name, mob, final_name, desig, "Loaded",
+                           auto_remark if auto_remark else "PDF से लोड"])
 
         if not mob or len(mob) != 10 or not mob.isdigit():
-            continue  # Mobile नहीं → Master में मत डालो
+            continue  # Mobile nahi → Master mein mat daalo
 
         if mob in mobile_to_row:
-            # ── पुराना कर्मचारी — Designation बदली है तो update करो ──────────
-            row_num = mobile_to_row[mob]
-            existing_row = all_master_values[row_num - 1]  # 0-based index
+            # ── Purana karmchari — sirf designation badli ho tab update karo ──
+            row_num      = mobile_to_row[mob]
+            existing_row = all_master_values[row_num - 1]
+            old_desig    = str(existing_row[idx_desig]).strip() if idx_desig is not None and idx_desig < len(existing_row) else ""
 
-            old_desig = str(existing_row[idx_desig]).strip() if idx_desig is not None and idx_desig < len(existing_row) else ""
-
-            if idx_desig is not None:
-                col_letter = chr(ord('A') + int(idx_desig))
-                ws_master.update_cell(row_num, int(idx_desig) + 1, desig)
+            if desig and desig.upper() != old_desig.upper():
+                ws_master.update_cell(row_num, idx_desig + 1, desig)
                 audit_rows.append([
-                    date_str, shift_name, mob, name, desig,
+                    date_str, shift_name, mob, final_name, desig,
                     "Designation_Updated",
                     f"पुराना: {old_desig} → नया: {desig}"
                 ])
         else:
-            # ── नया कर्मचारी → Master में add ──────────────────────────────
+            # ── Naya karmchari → Master mein add ──────────────────────────────
             new_row = [""] * max(5, len(header))
             if idx_srno  is not None: new_row[idx_srno]  = next_sr
             if idx_mob   is not None: new_row[idx_mob]   = mob
             if idx_desig is not None: new_row[idx_desig] = desig
-            if idx_name  is not None: new_row[idx_name]  = name
-            if idx_rem   is not None: new_row[idx_rem]   = ""
+            if idx_name  is not None: new_row[idx_name]  = final_name
+            if idx_rem   is not None: new_row[idx_rem]   = auto_remark  # smart remark
 
             ws_master.append_row(new_row)
             mobile_to_row[mob] = len(all_master_values) + 1
             all_master_values.append(new_row)
+            master_mobile_map[mob] = final_name
             next_sr += 1
 
-            new_staff.append({"Mobile_No": mob, "Employee_Name": name, "Designation": desig})
+            new_staff.append({"Mobile_No": mob, "Employee_Name": final_name,
+                              "Designation": desig, "Remarks": auto_remark})
 
-    # ── Audit log ─────────────────────────────────────────────────────────────
+    # ── Audit log ──────────────────────────────────────────────────────────────
     ws_audit = get_or_create_worksheet(sh, "Audit_Log")
     if audit_rows:
         ws_audit.append_rows(audit_rows)
-
-    # ── Staff_list में नए कर्मचारी जोड़ो (Mobile_No, Employee_Name, Rank, REMARK, STATUS) ──
-    # सिर्फ वो जो नए हैं (new_staff list में हैं)
-    try:
-        ws_staff = get_or_create_worksheet(sh, "Staff_list")
-        staff_all_vals = ws_staff.get_all_values()
-        # Header check
-        if not staff_all_vals:
-            ws_staff.append_row(["Mobile_No", "Employee_Name", "Rank", "REMARK", "STATUS"])
-            staff_all_vals = [["Mobile_No", "Employee_Name", "Rank", "REMARK", "STATUS"]]
-        # existing mobiles in Staff_list
-        existing_staff_mobs = set(str(r[0]).strip() for r in staff_all_vals[1:] if r)
-        staff_new_rows = []
-        for ns in new_staff:
-            if str(ns.get("Mobile_No","")).strip() not in existing_staff_mobs:
-                staff_new_rows.append([
-                    ns.get("Mobile_No",""),
-                    ns.get("Employee_Name",""),
-                    ns.get("Designation",""),  # Rank
-                    "",   # REMARK
-                    "1",  # STATUS default 1
-                ])
-        if staff_new_rows:
-            ws_staff.append_rows(staff_new_rows)
-    except Exception as _e:
-        pass  # Staff_list update optional
 
     load_all_data.clear()
     return new_staff
@@ -798,15 +812,14 @@ def update_shift_sheet(shift_name, staff_list, date_str):
 
 def load_historical_pdf(shift_name, staff_list, date_str):
     """
-    HISTORICAL PDF → Audit_Log में जाएगा + नए कर्मचारी Master_Data में add होंगे
-    Shift sheets नहीं बदलेंगी
+    HISTORICAL PDF → Audit_Log mein jaayega + naye karmchari Master_Data mein add honge
+    Shift sheets nahi badlengi
     Returns: (audit_count, new_staff_list)
     """
     client = get_client()
     sh = client.open_by_key(SHEET_ID)
     ws_audit = get_or_create_worksheet(sh, "Audit_Log")
 
-    # ── Master_Data पढ़ो ──────────────────────────────────────────────────────
     ws_master = sh.worksheet("Master_Data")
     all_master_values = ws_master.get_all_values()
     if not all_master_values:
@@ -835,38 +848,52 @@ def load_historical_pdf(shift_name, staff_list, date_str):
         idx_srno, idx_mob, idx_desig, idx_name, idx_rem = 0,1,2,3,4
 
     existing_mobiles = set()
+    master_mobile_map = {}
     for row in all_master_values[1:]:
         if idx_mob is not None and idx_mob < len(row):
             m = str(row[idx_mob]).strip()
             if m:
                 existing_mobiles.add(m)
+                if idx_name is not None and idx_name < len(row):
+                    n = str(row[idx_name]).strip()
+                    if n:
+                        master_mobile_map[m] = n
 
     next_sr = len(all_master_values)
     audit_rows = []
     new_staff  = []
 
     for s in staff_list:
-        mob   = str(s.get("Mobile_No","")).strip()
-        name  = str(s.get("Employee_Name","")).strip()
-        desig = str(s.get("Designation","")).strip()
-        if not name:
+        mob      = str(s.get("Mobile_No","")).strip()
+        pdf_name = str(s.get("Employee_Name","")).strip()
+        desig    = str(s.get("Designation","")).strip()
+
+        master_naam = master_mobile_map.get(mob, None)
+        final_name  = master_naam if master_naam else pdf_name
+
+        if not final_name:
             continue
+
+        auto_remark = smart_detect_remarks(s)
 
         if mob and len(mob)==10 and mob.isdigit() and mob not in existing_mobiles:
             new_row = [""]*max(5,len(header))
             if idx_srno  is not None: new_row[idx_srno]  = next_sr
             if idx_mob   is not None: new_row[idx_mob]   = mob
             if idx_desig is not None: new_row[idx_desig] = desig
-            if idx_name  is not None: new_row[idx_name]  = name
-            if idx_rem   is not None: new_row[idx_rem]   = ""
+            if idx_name  is not None: new_row[idx_name]  = final_name
+            if idx_rem   is not None: new_row[idx_rem]   = auto_remark
             ws_master.append_row(new_row)
             existing_mobiles.add(mob)
+            master_mobile_map[mob] = final_name
             all_master_values.append(new_row)
             next_sr += 1
-            new_staff.append({"Mobile_No":mob,"Employee_Name":name,"Designation":desig})
-            audit_rows.append([date_str,shift_name,mob,name,desig,"Historical","पुराना record — नया कर्मचारी Master में जोड़ा"])
+            new_staff.append({"Mobile_No":mob,"Employee_Name":final_name,"Designation":desig,"Remarks":auto_remark})
+            audit_rows.append([date_str,shift_name,mob,final_name,desig,"Historical",
+                               auto_remark if auto_remark else "पुराना record — नया कर्मचारी Master में जोड़ा"])
         else:
-            audit_rows.append([date_str,shift_name,mob,name,desig,"Historical","पुराना record — Master unchanged"])
+            audit_rows.append([date_str,shift_name,mob,final_name,desig,"Historical",
+                               auto_remark if auto_remark else "पुराना record — Master unchanged"])
 
     if audit_rows:
         ws_audit.append_rows(audit_rows)
@@ -1188,52 +1215,68 @@ Format:
 
 
 def ai_employee_search(mob, master_df, shift_dfs, audit_df, avkaash_df):
+    """Mobile number se complete employee card — Master_Data se naam, Audit se history"""
+    import html as html_lib
     mob = str(mob).strip()
 
+    def clean_mob(x):
+        s = str(x).strip()
+        if s.endswith('.0'):
+            s = s[:-2]
+        return s
+
+    # Master se basic info
     emp_row = None
     if not master_df.empty and "Mobile_No" in master_df.columns:
-        # Integer issue fix — .0 हटाओ
-        def clean_mob(x):
-            s = str(x).strip()
-            if s.endswith('.0'):
-                s = s[:-2]
-            return s
-        
         res = master_df[master_df["Mobile_No"].apply(clean_mob) == mob]
         if not res.empty:
             emp_row = res.iloc[0]
 
     if emp_row is None:
+        # Audit_Log mein bhi dhundho (agar Master mein nahi)
+        if not audit_df.empty and "Mobile_No" in audit_df.columns:
+            a_res = audit_df[audit_df["Mobile_No"].apply(clean_mob) == mob]
+            if not a_res.empty:
+                last = a_res.iloc[-1]
+                name_col = next((c for c in ["Employee_Name","Name"] if c in last.index), None)
+                desig_col = next((c for c in ["Designation"] if c in last.index), None)
+                return {
+                    "name":  html_lib.escape(str(last[name_col]).strip() if name_col else "—"),
+                    "designation": html_lib.escape(str(last[desig_col]).strip() if desig_col else "—"),
+                    "mobile": mob,
+                    "remarks": "",
+                    "current_shift": "—",
+                    "history": [],
+                    "leaves": []
+                }, None
         return None, "कर्मचारी नहीं मिला"
-    
-    # बाकी code same रहेगा...
-    # Master columns: Sr_No, Mobile_No, Designation, Name, Remarks
-    # "Name" or "Employee_Name" — दोनों handle करो
-    name  = str(emp_row.get("Name", emp_row.get("Employee_Name", "—"))).strip()
-    desig = str(emp_row.get("Designation", "—")).strip()
-    remarks = str(emp_row.get("Remarks", "")).strip()
 
-    # Current shift — shift sheets में mobile ढूंढो
+    name_col = next((c for c in ["Name","Employee_Name"] if c in emp_row.index), None)
+    name    = html_lib.escape(str(emp_row[name_col]).strip() if name_col else "—")
+    desig   = html_lib.escape(str(emp_row.get("Designation", "—")).strip())
+    remarks = html_lib.escape(str(emp_row.get("Remarks", "")).strip())
+
+    # Current shift
     current_shift = "—"
     for s_name, s_df in shift_dfs.items():
         if not s_df.empty and "Mobile_No" in s_df.columns:
-            found = s_df[s_df["Mobile_No"].astype(str).str.strip() == mob]
+            found = s_df[s_df["Mobile_No"].apply(clean_mob) == mob]
             if not found.empty:
                 current_shift = s_name
                 break
 
-    # 2 months history from Audit_Log
+    # Audit Log se history
     history = []
     if not audit_df.empty and "Mobile_No" in audit_df.columns:
-        emp_audit = audit_df[audit_df["Mobile_No"].astype(str).str.strip() == mob]
+        emp_audit = audit_df[audit_df["Mobile_No"].apply(clean_mob) == mob]
         if not emp_audit.empty:
-            cols_avail = [c for c in ["Date","Shift","Action"] if c in emp_audit.columns]
+            cols_avail = [c for c in ["Date","Shift","Designation","Remarks"] if c in emp_audit.columns]
             history = emp_audit[cols_avail].tail(20).values.tolist()
 
-    # Leave records from Avkaash
+    # Leave records
     leaves = []
     if not avkaash_df.empty and "Mobile_No" in avkaash_df.columns:
-        emp_leave = avkaash_df[avkaash_df["Mobile_No"].astype(str).str.strip() == mob]
+        emp_leave = avkaash_df[avkaash_df["Mobile_No"].apply(clean_mob) == mob]
         if not emp_leave.empty:
             leave_cols = [c for c in ["Leave_From","Leave_To","Leave_Reason","Status"] if c in emp_leave.columns]
             leaves = emp_leave[leave_cols].values.tolist()
@@ -1559,13 +1602,16 @@ with tab2:
                             📌 {emp_data['remarks']}
                         </span></div>"""
 
-                # History table
+                # History table - Audit Log se (Date, Shift, Designation, Remarks)
                 hist_html = ""
                 if emp_data["history"]:
                     rows_html = "".join([
-                        f"<tr><td style='padding:4px 8px;color:#a0b8d8'>{h[0] if len(h)>0 else ''}</td>"
+                        f"<tr>"
+                        f"<td style='padding:4px 8px;color:#a0b8d8'>{h[0] if len(h)>0 else ''}</td>"
                         f"<td style='padding:4px 8px;color:#60a5fa'>{h[1] if len(h)>1 else ''}</td>"
-                        f"<td style='padding:4px 8px;color:#4ade80'>{h[2] if len(h)>2 else ''}</td></tr>"
+                        f"<td style='padding:4px 8px;color:#4ade80'>{h[2] if len(h)>2 else ''}</td>"
+                        f"<td style='padding:4px 8px;color:#fbbf24;font-size:0.75rem'>{h[3] if len(h)>3 else ''}</td>"
+                        f"</tr>"
                         for h in emp_data["history"][-10:]
                     ])
                     hist_html = f"""<div style="margin-top:16px;">
@@ -1574,7 +1620,8 @@ with tab2:
                             <tr style="background:rgba(255,255,255,0.05)">
                                 <th style="padding:4px 8px;text-align:left;color:#7a92b8">तारीख</th>
                                 <th style="padding:4px 8px;text-align:left;color:#7a92b8">Shift</th>
-                                <th style="padding:4px 8px;text-align:left;color:#7a92b8">Action</th>
+                                <th style="padding:4px 8px;text-align:left;color:#7a92b8">पद</th>
+                                <th style="padding:4px 8px;text-align:left;color:#7a92b8">Remarks</th>
                             </tr>
                             {rows_html}
                         </table></div>"""
@@ -1702,29 +1749,72 @@ with tab5:
         st.info("कोई अवकाश record नहीं है।")
 
     st.markdown("---")
-    st.markdown("**नया अवकाश जोड़ें**")
+    st.markdown("**🌴 नया अवकाश जोड़ें**")
+
+    # Mobile number se naam/rank auto-lookup
+    def clean_mob_av(x):
+        s = str(x).strip()
+        return s[:-2] if s.endswith('.0') else s
+
+    lc_mob_col, lc_info_col = st.columns([1, 2])
+    with lc_mob_col:
+        l_mob = st.text_input("📱 मोबाइल नं. *", key="l_mob", max_chars=10,
+                               placeholder="10 अंक दर्ज करें...")
+
+    # Auto lookup
+    auto_name, auto_desig = "", ""
+    if l_mob and len(l_mob.strip()) == 10 and l_mob.strip().isdigit():
+        if not master_df.empty and "Mobile_No" in master_df.columns:
+            res = master_df[master_df["Mobile_No"].apply(clean_mob_av) == l_mob.strip()]
+            if not res.empty:
+                row = res.iloc[0]
+                name_col_av = next((c for c in ["Name","Employee_Name"] if c in row.index), None)
+                auto_name  = str(row[name_col_av]).strip() if name_col_av else ""
+                auto_desig = str(row.get("Designation","")).strip()
+
+    with lc_info_col:
+        if auto_name:
+            st.markdown(f"""
+            <div style="background:rgba(34,197,94,0.1);border:1px solid rgba(34,197,94,0.35);
+                border-radius:10px;padding:10px 16px;margin-top:4px;display:flex;gap:16px;align-items:center;">
+                <span style="font-size:1.3rem;">✅</span>
+                <div>
+                    <div style="color:#4ade80;font-weight:700;font-size:0.95rem;">{auto_name}</div>
+                    <div style="color:#7a92b8;font-size:0.8rem;">{auto_desig}</div>
+                </div>
+            </div>""", unsafe_allow_html=True)
+        elif l_mob and len(l_mob.strip()) == 10:
+            st.markdown("""
+            <div style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.3);
+                border-radius:10px;padding:10px 16px;margin-top:4px;">
+                <span style="color:#f87171;font-size:0.85rem;">⚠️ Master Data में नहीं मिला — नाम मैन्युअल भरें</span>
+            </div>""", unsafe_allow_html=True)
+
     lc1, lc2, lc3 = st.columns(3)
     with lc1:
-        l_mob = st.text_input("मोबाइल नं. *", key="l_mob", max_chars=10)
-        l_name = st.text_input("नाम", key="l_name")
+        l_name  = st.text_input("नाम", key="l_name", value=auto_name,
+                                 placeholder="Auto-fill होगा...")
+        l_desig = st.text_input("पद", key="l_desig", value=auto_desig,
+                                 placeholder="Auto-fill होगा...")
     with lc2:
-        l_desig = st.text_input("पद", key="l_desig")
-        l_from = st.date_input("छुट्टी से", key="l_from", value=now_ist().date())
+        l_from = st.date_input("📅 छुट्टी से", key="l_from", value=now_ist().date())
+        l_to   = st.date_input("📅 छुट्टी तक", key="l_to",   value=now_ist().date())
     with lc3:
-        l_to = st.date_input("छुट्टी तक", key="l_to", value=now_ist().date())
-        l_sd = st.number_input("SD Days", value=0, min_value=0, key="l_sd")
-    l_reason = st.text_input("कारण", key="l_reason")
+        l_sd     = st.number_input("SD Days", value=0, min_value=0, key="l_sd")
+        l_reason = st.text_input("कारण", key="l_reason", placeholder="जैसे: बीमारी, व्यक्तिगत...")
 
     if st.button("✅ अवकाश दर्ज करें", key="save_leave"):
-        if l_mob and l_name:
+        final_l_mob  = l_mob.strip() if l_mob else ""
+        final_l_name = l_name.strip() if l_name else auto_name.strip()
+        if final_l_mob and final_l_name:
             try:
                 add_leave(
-                    l_mob, l_name, l_desig,
+                    final_l_mob, final_l_name, l_desig.strip() if l_desig else auto_desig,
                     l_from.strftime("%d-%m-%Y"),
                     l_to.strftime("%d-%m-%Y"),
                     l_reason, l_sd
                 )
-                st.success("✅ अवकाश दर्ज हो गया!")
+                st.success(f"✅ {final_l_name} का अवकाश दर्ज हो गया!")
                 st.rerun()
             except Exception as e:
                 st.error(f"Error: {e}")
