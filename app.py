@@ -767,9 +767,8 @@ def update_shift_sheet(shift_name, staff_list, date_str):
 
 def load_historical_pdf(shift_name, staff_list, date_str):
     """
-    HISTORICAL PDF → Audit_Log में जाएगा
+    HISTORICAL PDF → Audit_Log में जाएगा + नए कर्मचारी Master_Data में add होंगे
     Shift sheets नहीं बदलेंगी
-    लेकिन जो नाम/नंबर Master_Data में नहीं हैं → वो add होंगे
     Returns: (audit_count, new_staff_list)
     """
     client = get_client()
@@ -779,12 +778,9 @@ def load_historical_pdf(shift_name, staff_list, date_str):
     # ── Master_Data पढ़ो ──────────────────────────────────────────────────────
     ws_master = sh.worksheet("Master_Data")
     all_master_values = ws_master.get_all_values()
-
-    # Header नहीं है तो बनाओ
     if not all_master_values:
         ws_master.append_row(["Sr_No", "Mobile_No", "Designation", "Name", "Remarks"])
         all_master_values = [["Sr_No", "Mobile_No", "Designation", "Name", "Remarks"]]
-
     header = all_master_values[0]
 
     def col_idx(headers, *names):
@@ -794,20 +790,19 @@ def load_historical_pdf(shift_name, staff_list, date_str):
                     return i
         return None
 
-    idx_mob   = col_idx(header, "Mobile_No", "mobile_no", "mobile")
-    idx_desig = col_idx(header, "Designation", "designation", "पदनाम")
-    idx_name  = col_idx(header, "Name", "name", "नाम", "Employee_Name")
-    idx_srno  = col_idx(header, "Sr_No", "sr_no", "क्र०स०", "srno")
-    idx_rem   = col_idx(header, "Remarks", "remarks", "REMARKS")
+    idx_mob   = col_idx(header, "Mobile_No","mobile_no","mobile")
+    idx_desig = col_idx(header, "Designation","designation","पदनाम")
+    idx_name  = col_idx(header, "Name","name","नाम","Employee_Name")
+    idx_srno  = col_idx(header, "Sr_No","sr_no","srno")
+    idx_rem   = col_idx(header, "Remarks","remarks")
 
     if idx_mob is None:
         ws_master.clear()
-        ws_master.append_row(["Sr_No", "Mobile_No", "Designation", "Name", "Remarks"])
-        all_master_values = [["Sr_No", "Mobile_No", "Designation", "Name", "Remarks"]]
+        ws_master.append_row(["Sr_No","Mobile_No","Designation","Name","Remarks"])
+        all_master_values = [["Sr_No","Mobile_No","Designation","Name","Remarks"]]
         header = all_master_values[0]
-        idx_srno, idx_mob, idx_desig, idx_name, idx_rem = 0, 1, 2, 3, 4
+        idx_srno, idx_mob, idx_desig, idx_name, idx_rem = 0,1,2,3,4
 
-    # Master में मौजूद mobile numbers का set बनाओ
     existing_mobiles = set()
     for row in all_master_values[1:]:
         if idx_mob is not None and idx_mob < len(row):
@@ -816,53 +811,235 @@ def load_historical_pdf(shift_name, staff_list, date_str):
                 existing_mobiles.add(m)
 
     next_sr = len(all_master_values)
-
-    # ── Audit + Master update ──────────────────────────────────────────────────
     audit_rows = []
     new_staff  = []
 
     for s in staff_list:
-        mob   = str(s.get("Mobile_No", "")).strip()
-        name  = str(s.get("Employee_Name", "")).strip()
-        desig = str(s.get("Designation", "")).strip()
-
+        mob   = str(s.get("Mobile_No","")).strip()
+        name  = str(s.get("Employee_Name","")).strip()
+        desig = str(s.get("Designation","")).strip()
         if not name:
             continue
 
-        if mob and len(mob) == 10 and mob.isdigit() and mob not in existing_mobiles:
-            # ── नया कर्मचारी → Master_Data में add करो ──────────────────────
-            new_row = [""] * max(5, len(header))
+        if mob and len(mob)==10 and mob.isdigit() and mob not in existing_mobiles:
+            new_row = [""]*max(5,len(header))
             if idx_srno  is not None: new_row[idx_srno]  = next_sr
             if idx_mob   is not None: new_row[idx_mob]   = mob
             if idx_desig is not None: new_row[idx_desig] = desig
             if idx_name  is not None: new_row[idx_name]  = name
             if idx_rem   is not None: new_row[idx_rem]   = ""
-
             ws_master.append_row(new_row)
             existing_mobiles.add(mob)
             all_master_values.append(new_row)
             next_sr += 1
-
-            new_staff.append({"Mobile_No": mob, "Employee_Name": name, "Designation": desig})
-
-            audit_rows.append([
-                date_str, shift_name, mob, name, desig,
-                "Historical",
-                "पुराना record — नया कर्मचारी Master में जोड़ा"
-            ])
+            new_staff.append({"Mobile_No":mob,"Employee_Name":name,"Designation":desig})
+            audit_rows.append([date_str,shift_name,mob,name,desig,"Historical","पुराना record — नया कर्मचारी Master में जोड़ा"])
         else:
-            # पुराना कर्मचारी — सिर्फ Audit में
-            audit_rows.append([
-                date_str, shift_name, mob, name, desig,
-                "Historical",
-                "पुराना record — Master unchanged"
-            ])
+            audit_rows.append([date_str,shift_name,mob,name,desig,"Historical","पुराना record — Master unchanged"])
 
     if audit_rows:
         ws_audit.append_rows(audit_rows)
-
     load_all_data.clear()
     return len(audit_rows), new_staff
+
+
+def bulk_historical_import_from_sheet(source_sheet_id, date_from, date_to, progress_cb=None):
+    """
+    किसी भी Google Sheet से bulk historical data import करें।
+
+    Source sheet format (कोई भी एक sheet tab):
+        Date | Shift | Mobile_No | Employee_Name | Designation
+        (या Audit_Log जैसा format)
+
+    Steps:
+      1. Source sheet पढ़ो
+      2. date_from – date_to range filter करो
+      3. Master_Data से existing mobiles check करो → नए add करो
+      4. Audit_Log में Historical entries डालो (duplicate date+shift+mobile skip)
+    Returns: dict {total, added_master, added_audit, skipped_dup, new_employees}
+    """
+    client = get_client()
+    sh_dest = client.open_by_key(SHEET_ID)
+
+    # ── Source sheet पढ़ो ─────────────────────────────────────────────────────
+    try:
+        sh_src = client.open_by_key(source_sheet_id)
+        # पहली sheet या "Audit_Log" tab खोलो
+        try:
+            ws_src = sh_src.worksheet("Audit_Log")
+        except:
+            ws_src = sh_src.get_worksheet(0)
+        src_records = ws_src.get_all_records()
+    except Exception as e:
+        return {"error": f"Source sheet नहीं खुली: {e}"}
+
+    if not src_records:
+        return {"error": "Source sheet में कोई data नहीं मिला"}
+
+    # Flexible column mapping
+    def find_col(record, *names):
+        for n in names:
+            for k in record.keys():
+                if k.strip().lower() == n.lower():
+                    return k
+        return None
+
+    sample = src_records[0]
+    col_date  = find_col(sample, "Date","date","तारीख","दिनांक")
+    col_shift = find_col(sample, "Shift","shift","शिफ्ट")
+    col_mob   = find_col(sample, "Mobile_No","mobile_no","mobile","मोबाइल")
+    col_name  = find_col(sample, "Employee_Name","Name","name","employee_name","नाम","कर्मचारी")
+    col_desig = find_col(sample, "Designation","designation","पदनाम","पद")
+
+    if not col_name:
+        return {"error": "Source sheet में Name column नहीं मिला। Columns: " + str(list(sample.keys()))}
+
+    # Date filter
+    try:
+        d_from = datetime.strptime(date_from, "%d-%m-%Y").date()
+        d_to   = datetime.strptime(date_to,   "%d-%m-%Y").date()
+    except:
+        return {"error": "तारीख format गलत — DD-MM-YYYY होना चाहिए"}
+
+    def parse_date_flex(s):
+        for fmt in ["%d-%m-%Y","%d/%m/%Y","%Y-%m-%d","%d-%b-%Y"]:
+            try:
+                return datetime.strptime(str(s).strip(), fmt).date()
+            except:
+                pass
+        return None
+
+    # ── Existing Audit_Log — duplicates avoid करने के लिए ───────────────────
+    ws_audit = get_or_create_worksheet(sh_dest, "Audit_Log")
+    existing_audit_raw = ws_audit.get_all_values()
+    existing_audit_keys = set()
+    if len(existing_audit_raw) > 1:
+        ah = existing_audit_raw[0]
+        ai_date  = next((i for i,h in enumerate(ah) if "date" in h.lower()), 0)
+        ai_shift = next((i for i,h in enumerate(ah) if "shift" in h.lower()), 1)
+        ai_mob   = next((i for i,h in enumerate(ah) if "mobile" in h.lower()), 2)
+        for row in existing_audit_raw[1:]:
+            if len(row) > ai_mob:
+                key = f"{str(row[ai_date]).strip()}|{str(row[ai_shift]).strip()}|{str(row[ai_mob]).strip()}"
+                existing_audit_keys.add(key)
+
+    # ── Master_Data — existing mobiles ────────────────────────────────────────
+    ws_master = sh_dest.worksheet("Master_Data")
+    all_master = ws_master.get_all_values()
+    if not all_master:
+        ws_master.append_row(["Sr_No","Mobile_No","Designation","Name","Remarks"])
+        all_master = [["Sr_No","Mobile_No","Designation","Name","Remarks"]]
+    mh = all_master[0]
+
+    def cidx(headers, *names):
+        for n in names:
+            for i,h in enumerate(headers):
+                if h.strip().lower()==n.lower(): return i
+        return None
+
+    mi_mob   = cidx(mh,"Mobile_No","mobile_no","mobile")
+    mi_desig = cidx(mh,"Designation","designation")
+    mi_name  = cidx(mh,"Name","name","Employee_Name")
+    mi_srno  = cidx(mh,"Sr_No","sr_no")
+    mi_rem   = cidx(mh,"Remarks","remarks")
+
+    if mi_mob is None:
+        ws_master.clear()
+        ws_master.append_row(["Sr_No","Mobile_No","Designation","Name","Remarks"])
+        all_master = [["Sr_No","Mobile_No","Designation","Name","Remarks"]]
+        mh = all_master[0]
+        mi_srno,mi_mob,mi_desig,mi_name,mi_rem = 0,1,2,3,4
+
+    existing_mobiles = set()
+    for row in all_master[1:]:
+        if mi_mob is not None and mi_mob < len(row):
+            m = str(row[mi_mob]).strip()
+            if m: existing_mobiles.add(m)
+
+    next_sr = len(all_master)
+
+    # ── Main loop ─────────────────────────────────────────────────────────────
+    new_audit_rows  = []
+    new_master_rows_info = []  # new employees list
+    added_master    = 0
+    added_audit     = 0
+    skipped_dup     = 0
+    total_processed = 0
+
+    total_src = len(src_records)
+
+    for idx, rec in enumerate(src_records):
+        # Progress callback
+        if progress_cb and idx % 50 == 0:
+            progress_cb(idx, total_src)
+
+        date_val  = str(rec.get(col_date, "")).strip()  if col_date  else ""
+        shift_val = str(rec.get(col_shift,"")).strip()  if col_shift else "Unknown"
+        mob_val   = str(rec.get(col_mob,  "")).strip()  if col_mob   else ""
+        name_val  = str(rec.get(col_name, "")).strip()
+        desig_val = str(rec.get(col_desig,"")).strip()  if col_desig else ""
+
+        if not name_val:
+            continue
+
+        # Date filter
+        if date_val:
+            rec_date = parse_date_flex(date_val)
+            if rec_date is None or not (d_from <= rec_date <= d_to):
+                continue
+            formatted_date = rec_date.strftime("%d-%m-%Y")
+        else:
+            formatted_date = ""
+
+        total_processed += 1
+
+        # Shift normalize
+        shift_clean = shift_val if shift_val in SHIFT_NAMES else (shift_val or "Historical")
+
+        # Duplicate audit check
+        audit_key = f"{formatted_date}|{shift_clean}|{mob_val}"
+        if audit_key in existing_audit_keys:
+            skipped_dup += 1
+            continue
+
+        # Master check — नया कर्मचारी?
+        master_note = "पुराना record — Master unchanged"
+        if mob_val and len(mob_val)==10 and mob_val.isdigit() and mob_val not in existing_mobiles:
+            new_row = [""]*max(5,len(mh))
+            if mi_srno  is not None: new_row[mi_srno]  = next_sr
+            if mi_mob   is not None: new_row[mi_mob]   = mob_val
+            if mi_desig is not None: new_row[mi_desig] = desig_val
+            if mi_name  is not None: new_row[mi_name]  = name_val
+            if mi_rem   is not None: new_row[mi_rem]   = ""
+            ws_master.append_row(new_row)
+            existing_mobiles.add(mob_val)
+            all_master.append(new_row)
+            next_sr += 1
+            added_master += 1
+            new_master_rows_info.append({"Mobile_No":mob_val,"Employee_Name":name_val,"Designation":desig_val})
+            master_note = "Bulk Import — नया कर्मचारी Master में जोड़ा"
+
+        new_audit_rows.append([
+            formatted_date, shift_clean, mob_val, name_val, desig_val,
+            "Historical", master_note
+        ])
+        existing_audit_keys.add(audit_key)
+        added_audit += 1
+
+    # Batch में audit rows डालो (50-50 की batches में)
+    batch_size = 50
+    for i in range(0, len(new_audit_rows), batch_size):
+        ws_audit.append_rows(new_audit_rows[i:i+batch_size])
+
+    load_all_data.clear()
+    return {
+        "total_src": total_src,
+        "total_processed": total_processed,
+        "added_audit": added_audit,
+        "added_master": added_master,
+        "skipped_dup": skipped_dup,
+        "new_employees": new_master_rows_info,
+    }
 
 
 def add_leave(mob, name, desig, leave_from, leave_to, reason, sd_days):
@@ -1202,7 +1379,7 @@ for col, shift_name, emoji, card_cls, badge_cls in upload_configs:
                             count, new_staff_hist = load_historical_pdf(shift_name, staff_list, pdf_date_str)
                             st.success(f"📚 {shift_name}: {count} records Audit_Log में")
                             if new_staff_hist:
-                                st.info(f"➕ {len(new_staff_hist)} नए कर्मचारी Master Data में जोड़े गए (पहले से नहीं थे)")
+                                st.info(f"➕ {len(new_staff_hist)} नए कर्मचारी Master में जोड़े गए")
                                 if "new_staff_alerts" not in st.session_state:
                                     st.session_state["new_staff_alerts"] = []
                                 st.session_state["new_staff_alerts"].extend(new_staff_hist)
@@ -1260,13 +1437,14 @@ for idx, (s_label, card_cls, badge_cls, color) in enumerate(shift_styles):
 #  TABS
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown("---")
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "🤖 AI Analysis",
     "🔍 कर्मचारी खोज",
     "👥 Master Data",
     "🌴 अवकाश",
     "📜 Audit Log",
-    "➕ कर्मचारी जोड़ें"
+    "➕ कर्मचारी जोड़ें",
+    "📂 Bulk Historical Import",
 ])
 
 # ─── TAB 1: AI Analysis ───────────────────────────────────────────────────────
@@ -1591,6 +1769,194 @@ with tab6:
                 st.error(f"Error: {e}")
         else:
             st.warning("JSON paste करें।")
+
+# ─── TAB 7: Bulk Historical Import ───────────────────────────────────────────
+with tab7:
+    st.markdown('<div class="section-title">📂 Bulk Historical Import — Google Sheet से सीधे</div>', unsafe_allow_html=True)
+    st.caption("01 मार्च से अब तक का पुराना data एक बार में Audit_Log में डालें + नए कर्मचारी Master में जुड़ेंगे")
+
+    st.markdown("""
+    <div style="background:rgba(46,117,182,0.08);border:1px solid rgba(46,117,182,0.3);
+        border-radius:14px;padding:16px 20px;margin-bottom:16px;font-size:0.85rem;line-height:1.8;">
+    <b style="color:#60a5fa;">📋 Source Sheet Format (किसी भी tab में ये columns होने चाहिए):</b><br>
+    &nbsp;&nbsp;• <b>Audit_Log tab</b> (preferred): Date | Shift | Mobile_No | Employee_Name | Designation | Action | Remarks<br>
+    &nbsp;&nbsp;• <b>कोई भी tab</b>: Date | Shift | Mobile_No | Name/Employee_Name | Designation<br>
+    <b style="color:#ffd700;">⚠️ Duplicate entries automatically skip होंगी</b>
+    </div>
+    """, unsafe_allow_html=True)
+
+    bh_c1, bh_c2 = st.columns(2)
+
+    with bh_c1:
+        bh_sheet_id = st.text_input(
+            "📊 Source Google Sheet ID",
+            placeholder="जैसे: 1ABC...xyz (URL से copy करें)",
+            key="bh_sheet_id",
+            help="Sheet URL में /d/ के बाद का हिस्सा"
+        )
+        st.caption("URL example: docs.google.com/spreadsheets/d/**SHEET_ID**/edit")
+
+    with bh_c2:
+        bh_col1, bh_col2 = st.columns(2)
+        with bh_col1:
+            bh_date_from = st.date_input(
+                "📅 तारीख से",
+                value=date(now_ist().year, 3, 1),  # 01 मार्च
+                key="bh_date_from"
+            )
+        with bh_col2:
+            bh_date_to = st.date_input(
+                "📅 तारीख तक",
+                value=now_ist().date(),
+                key="bh_date_to"
+            )
+
+    st.markdown("---")
+
+    # Preview section
+    bh_preview_btn = st.button("🔍 Preview करें (Import से पहले)", key="bh_preview", use_container_width=False)
+    bh_import_btn  = st.button("🚀 Bulk Import शुरू करें", key="bh_import",  use_container_width=False,
+                                type="primary")
+
+    if bh_preview_btn or bh_import_btn:
+        sid = bh_sheet_id.strip()
+        # Sheet ID URL से extract करो अगर पूरी URL दी हो
+        if "/spreadsheets/d/" in sid:
+            try:
+                sid = sid.split("/spreadsheets/d/")[1].split("/")[0]
+            except:
+                pass
+
+        if not sid:
+            st.warning("⚠️ Source Sheet ID डालें।")
+        else:
+            d_from_str = bh_date_from.strftime("%d-%m-%Y")
+            d_to_str   = bh_date_to.strftime("%d-%m-%Y")
+
+            if bh_preview_btn:
+                # सिर्फ preview — कुछ save नहीं होगा
+                with st.spinner("Source sheet पढ़ी जा रही है..."):
+                    try:
+                        _client = get_client()
+                        _sh = _client.open_by_key(sid)
+                        try:
+                            _ws = _sh.worksheet("Audit_Log")
+                        except:
+                            _ws = _sh.get_worksheet(0)
+                        _recs = _ws.get_all_records()
+
+                        if not _recs:
+                            st.error("Source sheet खाली है।")
+                        else:
+                            # Date filter
+                            d_f = datetime.strptime(d_from_str,"%d-%m-%Y").date()
+                            d_t = datetime.strptime(d_to_str,"%d-%m-%Y").date()
+
+                            sample = _recs[0]
+                            def _fc(rec,*names):
+                                for n in names:
+                                    for k in rec.keys():
+                                        if k.strip().lower()==n.lower(): return k
+                                return None
+                            _col_date  = _fc(sample,"Date","date","तारीख")
+                            _col_name  = _fc(sample,"Employee_Name","Name","name","नाम")
+
+                            filtered = []
+                            for r in _recs:
+                                if _col_name and not str(r.get(_col_name,"")).strip():
+                                    continue
+                                if _col_date:
+                                    for fmt in ["%d-%m-%Y","%d/%m/%Y","%Y-%m-%d"]:
+                                        try:
+                                            rd = datetime.strptime(str(r[_col_date]).strip(),fmt).date()
+                                            if d_f <= rd <= d_t:
+                                                filtered.append(r)
+                                            break
+                                        except: pass
+
+                            st.success(f"✅ Source sheet में कुल **{len(_recs)}** rows मिलीं")
+                            st.info(f"📅 {d_from_str} → {d_to_str} range में **{len(filtered)}** records import होंगे")
+
+                            if filtered:
+                                prev_df = pd.DataFrame(filtered[:10])
+                                st.markdown("**पहले 10 rows (preview):**")
+                                st.dataframe(prev_df, use_container_width=True, hide_index=True, height=200)
+                                st.caption(f"Available columns: {list(sample.keys())}")
+                    except Exception as e:
+                        st.error(f"❌ Sheet नहीं खुली: {e}")
+                        st.info("💡 सुनिश्चित करें कि Source Sheet आपके Service Account के साथ share की हुई है।")
+
+            elif bh_import_btn:
+                # असली import
+                prog_bar = st.progress(0, text="Import शुरू हो रही है...")
+                status_area = st.empty()
+
+                def progress_update(done, total):
+                    pct = int((done / total) * 100) if total else 0
+                    prog_bar.progress(pct, text=f"Processing... {done}/{total} rows")
+
+                with st.spinner("Bulk import चल रही है — कृपया प्रतीक्षा करें..."):
+                    result = bulk_historical_import_from_sheet(
+                        source_sheet_id=sid,
+                        date_from=d_from_str,
+                        date_to=d_to_str,
+                        progress_cb=progress_update
+                    )
+
+                prog_bar.empty()
+
+                if "error" in result:
+                    st.error(f"❌ Error: {result['error']}")
+                    if "Service Account" not in result['error']:
+                        st.info("💡 Source Sheet को अपने Service Account Email के साथ share करें (Editor access)।")
+                else:
+                    # Success summary
+                    r1,r2,r3,r4 = st.columns(4)
+                    with r1:
+                        st.markdown(f'<div class="metric-card card-blue"><span class="icon">📄</span><div class="val">{result["total_processed"]}</div><div class="lbl">Processed</div></div>', unsafe_allow_html=True)
+                    with r2:
+                        st.markdown(f'<div class="metric-card card-green"><span class="icon">✅</span><div class="val">{result["added_audit"]}</div><div class="lbl">Audit Log में जोड़े</div></div>', unsafe_allow_html=True)
+                    with r3:
+                        st.markdown(f'<div class="metric-card card-gold"><span class="icon">👤</span><div class="val">{result["added_master"]}</div><div class="lbl">Master में नए</div></div>', unsafe_allow_html=True)
+                    with r4:
+                        st.markdown(f'<div class="metric-card card-orange"><span class="icon">⏭️</span><div class="val">{result["skipped_dup"]}</div><div class="lbl">Duplicates Skip</div></div>', unsafe_allow_html=True)
+
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    st.success(f"🎉 Bulk Import सफल! {result['added_audit']} records Audit_Log में, {result['added_master']} नए कर्मचारी Master में जोड़े।")
+
+                    # नए कर्मचारी दिखाओ
+                    if result["new_employees"]:
+                        st.markdown("**➕ Master Data में नए जोड़े गए कर्मचारी:**")
+                        new_emp_df = pd.DataFrame(result["new_employees"])
+                        st.dataframe(new_emp_df, use_container_width=True, hide_index=True, height=200)
+
+                        # Alert में भी डालो
+                        if "new_staff_alerts" not in st.session_state:
+                            st.session_state["new_staff_alerts"] = []
+                        st.session_state["new_staff_alerts"].extend(result["new_employees"])
+
+                    if result["skipped_dup"] > 0:
+                        st.info(f"ℹ️ {result['skipped_dup']} records already Audit_Log में थे — skip किए गए।")
+
+                    st.rerun()
+
+    # Help section
+    with st.expander("❓ Source Sheet कैसे share करें?", expanded=False):
+        st.markdown("""
+        **Steps:**
+        1. अपनी **पुरानी Google Sheet** खोलें
+        2. ऊपर **Share** बटन दबाएं
+        3. अपना **Service Account Email** डालें
+           (Streamlit secrets → `gcp_service_account` → `client_email`)
+        4. **Editor** access दें → Share करें
+        5. Sheet का URL copy करें → यहाँ paste करें
+
+        **Sheet का URL:**
+        ```
+        https://docs.google.com/spreadsheets/d/SHEET_ID/edit
+        ```
+        बस **SHEET_ID** वाला हिस्सा यहाँ paste करें।
+        """)
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  FOOTER
