@@ -583,27 +583,25 @@ def extract_date_from_pdf_text(text):
     for pat in keyword_patterns:
         m = re.search(pat, text, re.IGNORECASE)
         if m:
-            d, mo, y = m.group(1).zfill(2), m.group(2).zfill(2), m.group(3)
+            d, mo, yr = m.groups()
             try:
-                dt = datetime.strptime(f"{d}-{mo}-{y}", "%d-%m-%Y")
-                return dt.strftime("%d-%m-%Y")
-            except:
+                return date(int(yr), int(mo), int(d))
+            except ValueError:
                 pass
 
-    # Generic date patterns
+    # अगर keyword नहीं मिला तो generic date pattern देखो
     generic_patterns = [
-        r'\b(\d{1,2})[./:_\-](\d{1,2})[./:_\-](\d{4})\b',
+        r'(\d{1,2})[./:_\-](\d{1,2})[./:_\-](\d{4})',
     ]
     for pat in generic_patterns:
-        for m in re.finditer(pat, text):
-            d, mo, y = m.group(1).zfill(2), m.group(2).zfill(2), m.group(3)
+        m = re.search(pat, text)
+        if m:
+            d, mo, yr = m.groups()
             try:
-                dt = datetime.strptime(f"{d}-{mo}-{y}", "%d-%m-%Y")
-                # Sanity check: reasonable year range
-                if 2020 <= dt.year <= 2030:
-                    return dt.strftime("%d-%m-%Y")
-            except:
+                return date(int(yr), int(mo), int(d))
+            except ValueError:
                 pass
+
     return None
 
 
