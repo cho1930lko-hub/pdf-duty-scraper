@@ -1696,19 +1696,28 @@ if "new_staff_alerts" in st.session_state and st.session_state["new_staff_alerts
         st.rerun()
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  PDF UPLOAD — FIX 1 (duplicate check) + FIX 2 (auto date)
+#  🤖 AGENTIC PDF UPLOAD — Auto Parse → Manual Save
+#  PDF upload होते ही Agent चलता है, save आप करो
 # ══════════════════════════════════════════════════════════════════════════════
-st.markdown('<div class="section-title">📥 PDF Upload — तीनों Shifts</div>', unsafe_allow_html=True)
+st.markdown('<div class="section-title">🤖 Agent PDF Upload — तीनों Shifts</div>', unsafe_allow_html=True)
 
-# Manual date — FIX 2: यह fallback है, PDF से auto date मिलेगी तो override होगी
-pdf_date_input = st.date_input("📅 तारीख (PDF से auto-detect होगी | यह fallback है)",
-                                value=now_ist().date(), key="pdf_date")
-pdf_date_str   = pdf_date_input.strftime("%d-%m-%Y")
+pdf_date_input = st.date_input(
+    "📅 तारीख (PDF से auto-detect होगी | यह fallback है)",
+    value=now_ist().date(), key="pdf_date"
+)
+pdf_date_str = pdf_date_input.strftime("%d-%m-%Y")
 
 is_historical = st.checkbox(
     "📚 Historical Mode (पुराना data — सिर्फ Audit_Log में जाएगा, Shift sheet नहीं बदलेगी)",
     value=False, key="historical_mode"
 )
+
+# ── Session state init ────────────────────────────────────────────────────────
+for sn in ["Shift1", "Shift2", "Shift3"]:
+    if f"agent_result_{sn}" not in st.session_state:
+        st.session_state[f"agent_result_{sn}"] = None   # parsed result
+    if f"agent_file_{sn}" not in st.session_state:
+        st.session_state[f"agent_file_{sn}"] = None     # last filename
 
 pu1, pu2, pu3 = st.columns(3)
 upload_configs = [
@@ -1719,81 +1728,147 @@ upload_configs = [
 
 for col, shift_name, emoji, card_cls, badge_cls in upload_configs:
     with col:
-        st.markdown(f'<div class="shift-card {card_cls}"><span class="shift-badge {badge_cls}">{emoji} {shift_name}</span></div>', unsafe_allow_html=True)
-        uploaded = st.file_uploader(f"{shift_name} PDF", type=["pdf"],
-                                    key=f"upload_{shift_name}", label_visibility="collapsed")
+        st.markdown(
+            f'<div class="shift-card {card_cls}">'
+            f'<span class="shift-badge {badge_cls}">{emoji} {shift_name}</span>'
+            f'</div>', unsafe_allow_html=True
+        )
+        uploaded = st.file_uploader(
+            f"{shift_name} PDF", type=["pdf"],
+            key=f"upload_{shift_name}", label_visibility="collapsed"
+        )
+
+        # ── AGENT: नई file आई? तुरंत auto-parse करो ─────────────────────────
         if uploaded is not None:
-            st.caption(f"📎 {uploaded.name}")
+            new_file = (st.session_state[f"agent_file_{sn}"] != uploaded.name
+                        if (sn := shift_name) else True)
+            # पहली बार या नई file आई तो parse करो
+            if st.session_state[f"agent_result_{shift_name}"] is None or \
+               st.session_state[f"agent_file_{shift_name}"] != uploaded.name:
 
-            # FIX 2: PDF से date preview — file read करो but don't consume
-            pdf_bytes_preview = uploaded.read()
-            uploaded.seek(0)  # reset for later use
+                st.session_state[f"agent_file_{shift_name}"] = uploaded.name
+                st.session_state[f"agent_result_{shift_name}"] = None  # reset
 
-            auto_date_preview = extract_date_from_pdf_bytes(pdf_bytes_preview)
-            effective_date    = auto_date_preview if auto_date_preview else pdf_date_str
+                pdf_bytes_agent = uploaded.read()
 
-            if auto_date_preview:
-                st.markdown(f"""
-                <div class="date-detected-banner">
-                    📅 PDF से date मिली: <strong>{auto_date_preview}</strong>
-                    &nbsp;(manual date override नहीं होगी)
-                </div>""", unsafe_allow_html=True)
-            else:
-                st.caption(f"📅 Date: {pdf_date_str} (manual)")
+                with st.spinner(f"🤖 Agent काम कर रहा है — {shift_name} parse हो रहा है..."):
+                    # Step 1: Date detect
+                    auto_date = extract_date_from_pdf_bytes(pdf_bytes_agent)
+                    effective_date = auto_date or pdf_date_str
 
-            # FIX 1: Duplicate check — पहले से data है?
-            already_loaded, existing_count = check_shift_already_loaded(
-                audit_df, shift_name, effective_date
-            )
-
-            if already_loaded:
-                st.markdown(f"""
-                <div class="dup-warning">
-                    ⚠️ {shift_name} का {effective_date} का data पहले से
-                    {existing_count} records के साथ load है!
-                </div>""", unsafe_allow_html=True)
-
-                force_reload = st.checkbox(
-                    f"🔄 फिर भी reload करें ({shift_name})",
-                    key=f"force_{shift_name}",
-                    value=False
-                )
-                can_process = force_reload
-            else:
-                can_process = True
-
-            if st.button(f"🚀 {shift_name} Process करें",
-                         key=f"process_{shift_name}", use_container_width=True,
-                         disabled=not can_process):
-                with st.spinner(f"{shift_name} parse हो रहा है... (DeepSeek AI → Groq fallback)"):
-                    pdf_bytes = uploaded.read()
-                    staff_list, err, detected_date = parse_pdf_with_groq(
-                        pdf_bytes, shift_name, pdf_date_str
+                    # Step 2: Duplicate check
+                    already_loaded, existing_count = check_shift_already_loaded(
+                        audit_df, shift_name, effective_date
                     )
-                    # FIX 2: Final date — PDF detected > Groq detected > manual
-                    final_date = auto_date_preview or detected_date or pdf_date_str
 
-                    if err:
-                        st.error(f"❌ Error: {err}")
-                    elif not staff_list:
-                        st.warning(f"⚠️ {shift_name}: कोई कर्मचारी नहीं मिला")
-                    else:
-                        if is_historical:
-                            count, new_staff_hist = load_historical_pdf(shift_name, staff_list, final_date)
-                            st.success(f"📚 {shift_name}: {count} records Audit_Log में | तारीख: {final_date}")
-                            if new_staff_hist:
-                                st.info(f"➕ {len(new_staff_hist)} नए कर्मचारी Master में जोड़े गए")
-                                if "new_staff_alerts" not in st.session_state:
-                                    st.session_state["new_staff_alerts"] = []
-                                st.session_state["new_staff_alerts"].extend(new_staff_hist)
-                        else:
-                            new_staff = update_shift_sheet(shift_name, staff_list, final_date)
-                            st.success(f"✅ {shift_name}: {len(staff_list)} कर्मचारी load | तारीख: {final_date}")
-                            if new_staff:
-                                if "new_staff_alerts" not in st.session_state:
-                                    st.session_state["new_staff_alerts"] = []
-                                st.session_state["new_staff_alerts"].extend(new_staff)
-                        st.rerun()
+                    # Step 3: AI Parse
+                    staff_list, err, detected_date = parse_pdf_with_ai(
+                        pdf_bytes_agent, shift_name, pdf_date_str
+                    )
+                    final_date = auto_date or detected_date or pdf_date_str
+
+                    # Result session में save करो
+                    st.session_state[f"agent_result_{shift_name}"] = {
+                        "staff_list":     staff_list,
+                        "err":            err,
+                        "final_date":     final_date,
+                        "already_loaded": already_loaded,
+                        "existing_count": existing_count,
+                        "auto_date":      auto_date,
+                    }
+
+        # ── SUMMARY दिखाओ (हमेशा, अगर result है) ────────────────────────────
+        result = st.session_state.get(f"agent_result_{shift_name}")
+        if result:
+            staff_list     = result["staff_list"]
+            err            = result["err"]
+            final_date     = result["final_date"]
+            already_loaded = result["already_loaded"]
+            existing_count = result["existing_count"]
+            auto_date      = result["auto_date"]
+
+            if err:
+                st.error(f"❌ {err}")
+
+            elif not staff_list:
+                st.warning("⚠️ कोई कर्मचारी नहीं मिला")
+
+            else:
+                # ── Final Summary Card ────────────────────────────────────
+                desig_counts = {}
+                for s in staff_list:
+                    d = str(s.get("Designation","अज्ञात")).strip() or "अज्ञात"
+                    desig_counts[d] = desig_counts.get(d, 0) + 1
+                desig_html = " &nbsp;|&nbsp; ".join(
+                    f"<b>{d}</b>: {c}" for d,c in desig_counts.items()
+                )
+                date_src = "📄 PDF से" if auto_date else "📅 Manual"
+                dup_html = (
+                    f'<div style="color:#f97316;font-size:0.82rem;margin-top:6px;">'
+                    f'⚠️ पहले से {existing_count} records हैं इस date पर!</div>'
+                    if already_loaded else
+                    '<div style="color:#4ade80;font-size:0.82rem;margin-top:6px;">✅ कोई duplicate नहीं</div>'
+                )
+                st.markdown(f"""
+                <div style="background:rgba(30,50,90,0.7);border:1px solid rgba(96,165,250,0.3);
+                    border-radius:14px;padding:16px;margin-top:8px;">
+                  <div style="font-size:0.95rem;font-weight:700;color:#e8f0ff;margin-bottom:8px;">
+                    🤖 Agent Summary — {shift_name}
+                  </div>
+                  <div style="font-size:0.85rem;color:#a0b8d8;">
+                    👥 कुल कर्मचारी: <b style="color:#60a5fa;">{len(staff_list)}</b>
+                    &nbsp;&nbsp;|&nbsp;&nbsp;
+                    📅 तारीख: <b style="color:#4ade80;">{final_date}</b>
+                    &nbsp;({date_src})
+                  </div>
+                  <div style="font-size:0.8rem;color:#7a92b8;margin-top:5px;">{desig_html}</div>
+                  {dup_html}
+                </div>""", unsafe_allow_html=True)
+
+                # ── Duplicate warning पर force checkbox ──────────────────
+                can_save = True
+                if already_loaded:
+                    can_save = st.checkbox(
+                        f"🔄 फिर भी save करें ({shift_name})",
+                        key=f"force_{shift_name}", value=False
+                    )
+
+                # ── SAVE BUTTON (manual) ──────────────────────────────────
+                if st.button(f"💾 {shift_name} Save करें",
+                             key=f"save_{shift_name}",
+                             use_container_width=True,
+                             disabled=not can_save):
+                    with st.spinner(f"💾 {shift_name} Google Sheet में save हो रहा है..."):
+                        try:
+                            if is_historical:
+                                count, new_staff_hist = load_historical_pdf(
+                                    shift_name, staff_list, final_date
+                                )
+                                st.success(
+                                    f"📚 {shift_name}: {count} records Audit_Log में | "
+                                    f"तारीख: {final_date}"
+                                )
+                                if new_staff_hist:
+                                    st.info(f"➕ {len(new_staff_hist)} नए कर्मचारी Master में")
+                                    st.session_state.setdefault("new_staff_alerts", [])
+                                    st.session_state["new_staff_alerts"].extend(new_staff_hist)
+                            else:
+                                new_staff = update_shift_sheet(shift_name, staff_list, final_date)
+                                st.success(
+                                    f"✅ {shift_name}: {len(staff_list)} कर्मचारी save | "
+                                    f"तारीख: {final_date}"
+                                )
+                                if new_staff:
+                                    st.session_state.setdefault("new_staff_alerts", [])
+                                    st.session_state["new_staff_alerts"].extend(new_staff)
+
+                            # Save के बाद result clear करो
+                            st.session_state[f"agent_result_{shift_name}"] = None
+                            st.session_state[f"agent_file_{shift_name}"] = None
+                            st.rerun()
+
+                        except Exception as save_err:
+                            st.error(f"❌ Save error: {save_err}")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  CURRENT DUTY
@@ -2315,4 +2390,3 @@ st.markdown(f"""
   {now_ist().strftime('%d-%m-%Y %H:%M')} IST
 </div>
 """, unsafe_allow_html=True)
-
