@@ -7,6 +7,7 @@ import json
 import io
 import base64
 import re
+import time
 
 # ── Optional imports ──────────────────────────────────────────────────────────
 try:
@@ -21,12 +22,104 @@ try:
 except ImportError:
     GROQ_AVAILABLE = False
 
+# ── DeepSeek (OpenAI-compatible SDK) ─────────────────────────────────────────
+try:
+    from openai import OpenAI as _OpenAI
+    DEEPSEEK_AVAILABLE = True
+except ImportError:
+    DEEPSEEK_AVAILABLE = False
+
 try:
     from PIL import Image
     import fitz  # PyMuPDF
     OCR_AVAILABLE = True
 except ImportError:
     OCR_AVAILABLE = False
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  UNIFIED AI CALLER — DeepSeek (Primary) → Groq (Backup)
+#  Usage: ai_call(messages, max_tokens, temperature)
+#  Automatically switches to Groq if DeepSeek fails (rate limit / error)
+# ══════════════════════════════════════════════════════════════════════════════
+def ai_call(messages, max_tokens=1000, temperature=0.1):
+    """
+    Primary:  DeepSeek V3 (deepseek-chat)
+    Fallback: Groq       (llama-3.3-70b-versatile)
+    Returns: (response_text, model_used, error_or_None)
+    """
+    # ── 1. DeepSeek try करो ──────────────────────────────────────────────────
+    if DEEPSEEK_AVAILABLE:
+        try:
+            ds_key = st.secrets.get("deepseek", {}).get("api_key", "")
+            if ds_key:
+                ds_client = _OpenAI(
+                    api_key=ds_key,
+                    base_url="https://api.deepseek.com"
+                )
+                resp = ds_client.chat.completions.create(
+                    model="deepseek-chat",
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+                return resp.choices[0].message.content.strip(), "DeepSeek V3", None
+        except Exception as ds_err:
+            err_str = str(ds_err).lower()
+            # Rate limit या quota? → Groq पर जाओ
+            # कोई और error? → Groq पर जाओ (safe fallback)
+            pass  # fall through to Groq
+
+    # ── 2. Groq fallback ─────────────────────────────────────────────────────
+    if GROQ_AVAILABLE:
+        groq_models = [
+            "llama-3.3-70b-versatile",
+            "llama3-8b-8192",
+            "mixtral-8x7b-32768",
+        ]
+        groq_key = st.secrets.get("groq", {}).get("api_key", "")
+        if groq_key:
+            groq_client = Groq(api_key=groq_key)
+            last_err = None
+            for model in groq_models:
+                try:
+                    time.sleep(1)  # rate limit buffer
+                    resp = groq_client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                    )
+                    return resp.choices[0].message.content.strip(), f"Groq/{model}", None
+                except Exception as g_err:
+                    last_err = g_err
+                    time.sleep(2)  # थोड़ा रुको, फिर अगला model try करो
+                    continue
+            return "", "none", f"Groq सभी models fail: {last_err}"
+
+    return "", "none", "कोई AI available नहीं (DeepSeek + Groq दोनों unavailable)"
+
+
+def ai_call_with_image(messages_with_image, max_tokens=2000, temperature=0.1):
+    """
+    Image + text के लिए — सिर्फ Groq (vision support)
+    DeepSeek V3 vision अभी limited है।
+    """
+    if GROQ_AVAILABLE:
+        groq_key = st.secrets.get("groq", {}).get("api_key", "")
+        if groq_key:
+            groq_client = Groq(api_key=groq_key)
+            try:
+                resp = groq_client.chat.completions.create(
+                    model="llama-3.3-70b-versatile",
+                    messages=messages_with_image,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+                return resp.choices[0].message.content.strip(), "Groq/Vision", None
+            except Exception as e:
+                return "", "none", f"Vision error: {e}"
+    return "", "none", "Groq unavailable (vision के लिए Groq जरूरी है)"
+
 
 # ── IST timezone ──────────────────────────────────────────────────────────────
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -625,12 +718,12 @@ def extract_text_pdfplumber(pdf_bytes):
         pass
     return text.strip()
 
-def parse_pdf_with_groq(pdf_bytes, shift_name, shift_date_str):
-    if not GROQ_AVAILABLE:
-        return [], "Groq library install नहीं है", None
-
-    groq_client = Groq(api_key=st.secrets["groq"]["api_key"])
-
+def parse_pdf_with_ai(pdf_bytes, shift_name, shift_date_str):
+    """
+    PDF parse करो — DeepSeek primary, Groq fallback।
+    Text-based PDF: DeepSeek/Groq text prompt।
+    Image-based PDF: Groq vision।
+    """
     text_content = ""
     if PDF_AVAILABLE:
         text_content = extract_text_pdfplumber(pdf_bytes)
@@ -639,6 +732,7 @@ def parse_pdf_with_groq(pdf_bytes, shift_name, shift_date_str):
     auto_date = extract_date_from_pdf_bytes(pdf_bytes)
 
     if text_content and len(text_content) > 100:
+        # ── Text-based PDF: DeepSeek primary ─────────────────────────────────
         prompt = f"""यह एक duty roster PDF का text है।
 इसमें से सभी कर्मचारियों की जानकारी निकालो।
 
@@ -660,24 +754,23 @@ Rules:
 - Designation: पद/रैंक जैसे SI, HC, Constable, ASI आदि
 - अगर mobile नहीं है तो भी नाम और पद जोड़ो
 """
+        messages = [{"role": "user", "content": prompt}]
+        raw, model_used, err = ai_call(messages, max_tokens=2000, temperature=0.1)
+
+        if err:
+            return [], f"AI Error: {err}", auto_date
+
         try:
-            response = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=2000,
-                temperature=0.1,
-            )
-            raw = response.choices[0].message.content.strip()
             raw = re.sub(r'```json|```', '', raw).strip()
             data = json.loads(raw)
-            # FIX 2: Groq से मिली date भी try करो, पर regex वाली priority
-            groq_date = data.get("shift_date", "")
+            groq_date  = data.get("shift_date", "")
             final_date = auto_date or groq_date or shift_date_str
             return data.get("staff", []), None, final_date
         except Exception as e:
-            return [], f"Text parse error: {e}", auto_date
+            return [], f"JSON parse error ({model_used}): {e}", auto_date
 
     else:
+        # ── Image-based PDF: Groq vision ─────────────────────────────────────
         if not OCR_AVAILABLE:
             return [], "PyMuPDF install नहीं है (pip install PyMuPDF)", auto_date
 
@@ -687,7 +780,7 @@ Rules:
 
         all_staff = []
         for idx, img_b64 in enumerate(images_b64[:3]):
-            prompt = f"""यह {shift_name} duty roster की scanned image है।
+            prompt_text = f"""यह {shift_name} duty roster की scanned image है।
 
 इसमें से सभी कर्मचारियों की जानकारी निकालो।
 
@@ -705,25 +798,21 @@ Rules:
 - Designation: SI, HC, Constable, ASI, Inspector आदि
 - सभी visible कर्मचारी शामिल करो"""
 
-            try:
-                response = groq_client.chat.completions.create(
-                    model="llama-3.3-70b-versatile",
-                    messages=[{
-                        "role": "user",
-                        "content": [
-                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
-                            {"type": "text", "text": prompt}
-                        ]
-                    }],
-                    max_tokens=2000,
-                    temperature=0.1,
-                )
-                raw = response.choices[0].message.content.strip()
-                raw = re.sub(r'```json|```', '', raw).strip()
-                data = json.loads(raw)
-                all_staff.extend(data.get("staff", []))
-            except:
-                pass
+            vision_messages = [{
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
+                    {"type": "text", "text": prompt_text}
+                ]
+            }]
+            raw, model_used, err = ai_call_with_image(vision_messages, max_tokens=2000)
+            if raw:
+                try:
+                    raw = re.sub(r'```json|```', '', raw).strip()
+                    data = json.loads(raw)
+                    all_staff.extend(data.get("staff", []))
+                except:
+                    pass
 
         seen = set()
         unique_staff = []
@@ -734,6 +823,11 @@ Rules:
                 unique_staff.append(s)
 
         return unique_staff, None, auto_date
+
+
+# Backward-compatible alias (पुराने calls के लिए)
+def parse_pdf_with_groq(pdf_bytes, shift_name, shift_date_str):
+    return parse_pdf_with_ai(pdf_bytes, shift_name, shift_date_str)
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  SMART REMARKS DETECT
@@ -796,9 +890,8 @@ def update_shift_sheet(shift_name, staff_list, date_str):
 
     ws_shift = sh.worksheet(shift_name)
     ws_shift.clear()
-    ws_shift.append_row(["Mobile_No", "Employee_Name", "Designation", "Shift_Date"])
-
-    rows = []
+    # ── BATCH write: header + data एक ही API call में ────────────────────────
+    shift_rows = [["Mobile_No", "Employee_Name", "Designation", "Shift_Date"]]
     for s in staff_list:
         mob      = str(s.get("Mobile_No", "")).strip()
         pdf_name = str(s.get("Employee_Name", "")).strip()
@@ -806,13 +899,13 @@ def update_shift_sheet(shift_name, staff_list, date_str):
         master_naam = get_master_name(mob, master_mobile_map)
         final_name = master_naam if master_naam else pdf_name
         if final_name:
-            rows.append([mob, final_name, desig, date_str])
-    if rows:
-        ws_shift.append_rows(rows)
+            shift_rows.append([mob, final_name, desig, date_str])
+    ws_shift.append_rows(shift_rows)
 
-    new_staff  = []
-    audit_rows = []
-    next_sr    = len(all_master_values)
+    new_staff       = []
+    audit_rows      = []
+    new_master_rows = []   # ← batch के लिए collect करो
+    next_sr         = len(all_master_values)
 
     for s in staff_list:
         mob      = str(s.get("Mobile_No", "")).strip()
@@ -855,14 +948,18 @@ def update_shift_sheet(shift_name, staff_list, date_str):
             if idx_name  is not None: new_row[idx_name]  = final_name
             if idx_rem   is not None: new_row[idx_rem]   = auto_remark
 
-            ws_master.append_row(new_row)
-            mobile_to_row[mob] = len(all_master_values) + 1
+            new_master_rows.append(new_row)          # ← list में जोड़ो
+            mobile_to_row[mob] = len(all_master_values) + len(new_master_rows)
             all_master_values.append(new_row)
             master_mobile_map[mob] = final_name
             next_sr += 1
 
             new_staff.append({"Mobile_No": mob, "Employee_Name": final_name,
                               "Designation": desig, "Remarks": auto_remark})
+
+    # ── BATCH: सभी नए master rows एक ही API call में ─────────────────────────
+    if new_master_rows:
+        ws_master.append_rows(new_master_rows)
 
     ws_audit = get_or_create_worksheet(sh, "Audit_Log")
     if audit_rows:
@@ -909,9 +1006,10 @@ def load_historical_pdf(shift_name, staff_list, date_str):
                     if n:
                         master_mobile_map[m] = n
 
-    next_sr    = len(all_master_values)
-    audit_rows = []
-    new_staff  = []
+    next_sr         = len(all_master_values)
+    audit_rows      = []
+    new_staff       = []
+    new_master_rows = []   # ← batch के लिए
 
     for s in staff_list:
         mob      = str(s.get("Mobile_No","")).strip()
@@ -933,7 +1031,7 @@ def load_historical_pdf(shift_name, staff_list, date_str):
             if idx_desig is not None: new_row[idx_desig] = desig
             if idx_name  is not None: new_row[idx_name]  = final_name
             if idx_rem   is not None: new_row[idx_rem]   = auto_remark
-            ws_master.append_row(new_row)
+            new_master_rows.append(new_row)   # ← list में
             existing_mobiles.add(mob)
             master_mobile_map[mob] = final_name
             all_master_values.append(new_row)
@@ -944,6 +1042,10 @@ def load_historical_pdf(shift_name, staff_list, date_str):
         else:
             audit_rows.append([date_str,shift_name,mob,final_name,desig,"Historical",
                                auto_remark if auto_remark else "पुराना record — Master unchanged"])
+
+    # ── BATCH: नए master rows एक साथ ────────────────────────────────────────
+    if new_master_rows:
+        ws_master.append_rows(new_master_rows)
 
     if audit_rows:
         ws_audit.append_rows(audit_rows)
@@ -1136,10 +1238,8 @@ def add_employee_manual(mob, name, desig, remarks=""):
 #  AI HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
 def ai_pattern_analysis(audit_df):
-    if not GROQ_AVAILABLE or audit_df.empty:
+    if audit_df.empty:
         return "डेटा उपलब्ध नहीं है।"
-
-    groq_client = Groq(api_key=st.secrets["groq"]["api_key"])
 
     name_col  = find_col(audit_df.columns.tolist(), NAME_ALIASES)
     shift_col = find_col(audit_df.columns.tolist(), ["Shift","shift"])
@@ -1163,24 +1263,17 @@ Hindi में बताओ:
 
 संक्षिप्त और स्पष्ट रखो।"""
 
-    try:
-        response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=800,
-            temperature=0.3,
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        return f"AI Error: {e}"
+    text, model_used, err = ai_call(
+        [{"role": "user", "content": prompt}],
+        max_tokens=800,
+        temperature=0.3
+    )
+    if err:
+        return f"AI Error: {err}"
+    return f"_{model_used} द्वारा विश्लेषण_\n\n{text}"
 
 
 def ai_virtual_duty_suggest(audit_df, master_df):
-    if not GROQ_AVAILABLE:
-        return "Groq available नहीं है।"
-
-    groq_client = Groq(api_key=st.secrets["groq"]["api_key"])
-
     name_col = find_col(master_df.columns.tolist(), NAME_ALIASES)
     if name_col and not master_df.empty:
         staff_list = master_df[name_col].dropna().astype(str).tolist()
@@ -1209,16 +1302,14 @@ Format:
 🟢 Shift2: [names]  
 🔵 Shift3: [names]"""
 
-    try:
-        response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=500,
-            temperature=0.4,
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        return f"AI Error: {e}"
+    text, model_used, err = ai_call(
+        [{"role": "user", "content": prompt}],
+        max_tokens=500,
+        temperature=0.4
+    )
+    if err:
+        return f"AI Error: {err}"
+    return f"_{model_used} द्वारा सुझाव_\n\n{text}"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1494,6 +1585,7 @@ with st.sidebar:
         st.rerun()
     st.markdown("---")
     st.caption(f"Sheet ID: ...{SHEET_ID[-8:]}")
+    st.caption(f"DeepSeek: {'✅' if DEEPSEEK_AVAILABLE else '❌'}")
     st.caption(f"Groq: {'✅' if GROQ_AVAILABLE else '❌'}")
     st.caption(f"PDF: {'✅' if PDF_AVAILABLE else '❌'}")
     st.caption(f"OCR: {'✅' if OCR_AVAILABLE else '❌'}")
@@ -1625,7 +1717,7 @@ for col, shift_name, emoji, card_cls, badge_cls in upload_configs:
             if st.button(f"🚀 {shift_name} Process करें",
                          key=f"process_{shift_name}", use_container_width=True,
                          disabled=not can_process):
-                with st.spinner(f"{shift_name} parse हो रहा है... (Groq AI)"):
+                with st.spinner(f"{shift_name} parse हो रहा है... (DeepSeek AI → Groq fallback)"):
                     pdf_bytes = uploaded.read()
                     staff_list, err, detected_date = parse_pdf_with_groq(
                         pdf_bytes, shift_name, pdf_date_str
@@ -2175,3 +2267,4 @@ st.markdown(f"""
   {now_ist().strftime('%d-%m-%Y %H:%M')} IST
 </div>
 """, unsafe_allow_html=True)
+
