@@ -64,9 +64,6 @@ def ai_call(messages, max_tokens=1000, temperature=0.1):
                 )
                 return resp.choices[0].message.content.strip(), "DeepSeek V3", None
         except Exception as ds_err:
-            err_str = str(ds_err).lower()
-            # Rate limit या quota? → Groq पर जाओ
-            # कोई और error? → Groq पर जाओ (safe fallback)
             pass  # fall through to Groq
 
     # ── 2. Groq fallback ─────────────────────────────────────────────────────
@@ -92,11 +89,61 @@ def ai_call(messages, max_tokens=1000, temperature=0.1):
                     return resp.choices[0].message.content.strip(), f"Groq/{model}", None
                 except Exception as g_err:
                     last_err = g_err
-                    time.sleep(2)  # थोड़ा रुको, फिर अगला model try करो
+                    time.sleep(2)
                     continue
             return "", "none", f"Groq सभी models fail: {last_err}"
 
     return "", "none", "कोई AI available नहीं (DeepSeek + Groq दोनों unavailable)"
+
+
+def gspread_append_rows(ws, rows, retries=3, pause=15):
+    """
+    Google Sheets 429 (quota exceeded) होने पर auto-retry करो।
+    pause: कितने seconds रुकना है (default 15)
+    """
+    if not rows:
+        return
+    for attempt in range(retries):
+        try:
+            ws.append_rows(rows)
+            if attempt > 0:
+                time.sleep(2)  # write के बाद थोड़ा buffer
+            return
+        except gspread.exceptions.APIError as e:
+            if "429" in str(e) or "Quota" in str(e):
+                wait = pause * (attempt + 1)
+                time.sleep(wait)
+            else:
+                raise  # 429 नहीं है तो raise करो
+    # सभी retries fail — आखिरी बार try
+    ws.append_rows(rows)
+
+
+def safe_json_parse(raw_text):
+    """
+    JSON parse करो — अगर truncated हो तो repair करने की कोशिश करो।
+    Returns: (parsed_dict_or_None, error_or_None)
+    """
+    raw = re.sub(r'```json|```', '', raw_text).strip()
+    try:
+        return json.loads(raw), None
+    except json.JSONDecodeError:
+        # अधूरा JSON repair करने की कोशिश — आखिरी complete object तक काटो
+        # staff array के जितने complete objects हैं उन्हें निकालो
+        staff_matches = re.findall(
+            r'\{[^{}]*"Mobile_No"[^{}]*"Employee_Name"[^{}]*"Designation"[^{}]*\}',
+            raw
+        )
+        if staff_matches:
+            try:
+                staff_list = [json.loads(m) for m in staff_matches]
+                # shift_date निकालने की कोशिश
+                date_match = re.search(r'"shift_date"\s*:\s*"([^"]*)"', raw)
+                shift_date = date_match.group(1) if date_match else ""
+                return {"shift_date": shift_date, "staff": staff_list}, None
+            except:
+                pass
+        return None, f"JSON repair भी fail: {raw[:200]}..."
 
 
 def ai_call_with_image(messages_with_image, max_tokens=2000, temperature=0.1):
@@ -755,19 +802,20 @@ Rules:
 - अगर mobile नहीं है तो भी नाम और पद जोड़ो
 """
         messages = [{"role": "user", "content": prompt}]
-        raw, model_used, err = ai_call(messages, max_tokens=2000, temperature=0.1)
+        raw, model_used, err = ai_call(messages, max_tokens=4000, temperature=0.1)
 
         if err:
             return [], f"AI Error: {err}", auto_date
 
         try:
-            raw = re.sub(r'```json|```', '', raw).strip()
-            data = json.loads(raw)
+            data, parse_err = safe_json_parse(raw)
+            if parse_err or data is None:
+                return [], f"JSON parse error ({model_used}): {parse_err}", auto_date
             groq_date  = data.get("shift_date", "")
             final_date = auto_date or groq_date or shift_date_str
             return data.get("staff", []), None, final_date
         except Exception as e:
-            return [], f"JSON parse error ({model_used}): {e}", auto_date
+            return [], f"Parse error ({model_used}): {e}", auto_date
 
     else:
         # ── Image-based PDF: Groq vision ─────────────────────────────────────
@@ -805,12 +853,12 @@ Rules:
                     {"type": "text", "text": prompt_text}
                 ]
             }]
-            raw, model_used, err = ai_call_with_image(vision_messages, max_tokens=2000)
+            raw, model_used, err = ai_call_with_image(vision_messages, max_tokens=4000)
             if raw:
                 try:
-                    raw = re.sub(r'```json|```', '', raw).strip()
-                    data = json.loads(raw)
-                    all_staff.extend(data.get("staff", []))
+                    data, _ = safe_json_parse(raw)
+                    if data:
+                        all_staff.extend(data.get("staff", []))
                 except:
                     pass
 
@@ -900,7 +948,7 @@ def update_shift_sheet(shift_name, staff_list, date_str):
         final_name = master_naam if master_naam else pdf_name
         if final_name:
             shift_rows.append([mob, final_name, desig, date_str])
-    ws_shift.append_rows(shift_rows)
+    gspread_append_rows(ws_shift, shift_rows)
 
     new_staff       = []
     audit_rows      = []
@@ -959,11 +1007,11 @@ def update_shift_sheet(shift_name, staff_list, date_str):
 
     # ── BATCH: सभी नए master rows एक ही API call में ─────────────────────────
     if new_master_rows:
-        ws_master.append_rows(new_master_rows)
+        gspread_append_rows(ws_master, new_master_rows)
 
     ws_audit = get_or_create_worksheet(sh, "Audit_Log")
     if audit_rows:
-        ws_audit.append_rows(audit_rows)
+        gspread_append_rows(ws_audit, audit_rows)
 
     load_all_data.clear()
     return new_staff
@@ -1045,10 +1093,10 @@ def load_historical_pdf(shift_name, staff_list, date_str):
 
     # ── BATCH: नए master rows एक साथ ────────────────────────────────────────
     if new_master_rows:
-        ws_master.append_rows(new_master_rows)
+        gspread_append_rows(ws_master, new_master_rows)
 
     if audit_rows:
-        ws_audit.append_rows(audit_rows)
+        gspread_append_rows(ws_audit, audit_rows)
     load_all_data.clear()
     return len(audit_rows), new_staff
 
@@ -1197,7 +1245,7 @@ def bulk_historical_import_from_sheet(source_sheet_id, date_from, date_to, progr
 
     batch_size = 50
     for i in range(0, len(new_audit_rows), batch_size):
-        ws_audit.append_rows(new_audit_rows[i:i+batch_size])
+        gspread_append_rows(ws_audit, new_audit_rows[i:i+batch_size])
 
     load_all_data.clear()
     return {
