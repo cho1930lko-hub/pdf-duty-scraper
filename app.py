@@ -2037,23 +2037,23 @@ with tab2:
 
         if mob_q.isdigit() and len(mob_q) == 10:
             emp_data, err = ai_employee_search(
-            mob_q, master_df, display_shift_dfs, audit_df, avkaash_df
-        )
+                mob_q, master_df, display_shift_dfs, audit_df, avkaash_df
+            )
 
-        if err:
-            st.markdown(f"""
-            <div style="background:rgba(239,68,68,0.08);
-                border:1px solid rgba(239,68,68,0.3);
-                border-radius:14px;padding:20px;margin-top:12px;text-align:center;">
-                <div style="font-size:2rem;">🔍</div>
-                <div style="color:#f87171;font-weight:700;">मोबाइल नं. {mob_q} से कोई कर्मचारी नहीं मिला</div>
-            </div>""", unsafe_allow_html=True)
+            if err:
+                st.markdown(f"""
+                <div style="background:rgba(239,68,68,0.08);
+                    border:1px solid rgba(239,68,68,0.3);
+                    border-radius:14px;padding:20px;margin-top:12px;text-align:center;">
+                    <div style="font-size:2rem;">🔍</div>
+                    <div style="color:#f87171;font-weight:700;">मोबाइल नं. {mob_q} से कोई कर्मचारी नहीं मिला</div>
+                </div>""", unsafe_allow_html=True)
+
+            else:
+                render_employee_card(emp_data, active_leave_mobs)
 
         else:
-            render_employee_card(emp_data, active_leave_mobs)
-
-    else:
-        st.warning("⚠️ 10 अंकों का सही नंबर दर्ज करें")
+            st.warning("⚠️ 10 अंकों का सही नंबर दर्ज करें")
 
 # ─── TAB 3: Master Data ───────────────────────────────────────────────────────
 with tab3:
