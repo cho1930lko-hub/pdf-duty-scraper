@@ -176,7 +176,7 @@ def now_ist():
 
 # ── Page Config ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="ड्यूटी रोस्टर | 1930",
+    page_title="DUTY DATA  | 1930",
     page_icon="🚨",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -492,7 +492,7 @@ def check_password():
         <div class="login-wrap">
             <span class="login-icon">🔐</span>
             <div class="login-title">साइबर क्राइम 1930</div>
-            <div class="login-sub">ड्यूटी रोस्टर प्रणाली</div>
+            <div class="login-sub">DUTY DATA  PDF SCRAP</div>
         </div>
         """, unsafe_allow_html=True)
         col1, col2, col3 = st.columns([1, 2, 1])
@@ -1602,7 +1602,7 @@ st.markdown("""
   <div class="particle p3"></div><div class="particle p4"></div>
   <div class="particle p5"></div><div class="particle p6"></div>
   <h1>🚨 साइबर क्राइम हेल्पलाइन 1930</h1>
-  <div class="subtitle">✦ ड्यूटी रोस्टर प्रबंधन प्रणाली ✦</div>
+  <div class="subtitle">✦ DUTY DATA  COLLECTION ✦</div>
   <div class="header-badge"><span class="live-dot"></span>LIVE SYSTEM • ACTIVE</div>
 </div></div>
 """, unsafe_allow_html=True)
@@ -2385,7 +2385,7 @@ with tab7:
 st.markdown(f"""
 <div class="footer">
   🚨 साइबर क्राइम हेल्पलाइन <strong>1930</strong> &nbsp;|&nbsp;
-  ड्यूटी रोस्टर प्रणाली &nbsp;|&nbsp;
+  DUTY DATA  PDF SCRAP &nbsp;|&nbsp;
   <span class="live-dot"></span>
   {now_ist().strftime('%d-%m-%Y %H:%M')} IST
 </div>
