@@ -176,7 +176,7 @@ def now_ist():
 
 # ── Page Config ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="DUTY DATA  | 1930",
+    page_title="ड्यूटी रोस्टर | 1930",
     page_icon="🚨",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -492,7 +492,7 @@ def check_password():
         <div class="login-wrap">
             <span class="login-icon">🔐</span>
             <div class="login-title">साइबर क्राइम 1930</div>
-            <div class="login-sub">DUTY DATA  PDF SCRAP</div>
+            <div class="login-sub">ड्यूटी रोस्टर प्रणाली</div>
         </div>
         """, unsafe_allow_html=True)
         col1, col2, col3 = st.columns([1, 2, 1])
@@ -1415,20 +1415,29 @@ def ai_employee_search(mob, master_df, shift_dfs, audit_df, avkaash_df):
     desig   = str(emp_row[desig_col]).strip() if desig_col else "—"
     remarks = str(emp_row[rem_col]).strip()   if rem_col   else ""
 
+    # Audit Log की सबसे latest entry से current_shift निकालो
     current_shift = "—"
-    for s_name, s_df in shift_dfs.items():
-        mob_col_shift = find_col(s_df.columns.tolist(), MOBILE_ALIASES)
-        if mob_col_shift and not s_df.empty:
-            found = s_df[s_df[mob_col_shift].apply(clean_mob) == mob]
-            if not found.empty:
-                current_shift = s_name
-                break
-
     history = []
     mob_col_audit = find_col(audit_df.columns.tolist(), MOBILE_ALIASES)
     if mob_col_audit and not audit_df.empty:
         emp_audit = audit_df[audit_df[mob_col_audit].apply(clean_mob) == mob]
         if not emp_audit.empty:
+            # Latest date की entry से shift लो
+            shift_col_audit = find_col(emp_audit.columns.tolist(), ["Shift", "shift"])
+            date_col_audit  = find_col(emp_audit.columns.tolist(), ["Date", "date"])
+            if shift_col_audit:
+                if date_col_audit:
+                    try:
+                        emp_audit_sorted = emp_audit.copy()
+                        emp_audit_sorted["_d"] = pd.to_datetime(
+                            emp_audit_sorted[date_col_audit], format="%d-%m-%Y", errors="coerce"
+                        )
+                        latest_row = emp_audit_sorted.sort_values("_d", ascending=False).iloc[0]
+                        current_shift = str(latest_row[shift_col_audit]).strip() or "—"
+                    except Exception:
+                        current_shift = str(emp_audit.iloc[-1][shift_col_audit]).strip() or "—"
+                else:
+                    current_shift = str(emp_audit.iloc[-1][shift_col_audit]).strip() or "—"
             cols_avail = [c for c in ["Date","Shift","Designation","Remarks"] if c in emp_audit.columns]
             history = emp_audit[cols_avail].tail(20).values.tolist()
 
@@ -1471,10 +1480,18 @@ def render_employee_card(emp_data, active_leave_mobs):
         glow_color   = "rgba(249,115,22,0.15)"
         border_color = "rgba(249,115,22,0.4)"
     elif current_shift != "—":
-        status_text  = f"🟢 {_html.escape(current_shift)}"
-        status_color = "#22c55e"
-        glow_color   = "rgba(34,197,94,0.15)"
-        border_color = "rgba(34,197,94,0.4)"
+        # Shift ke hisaab se color choose karo
+        _s = current_shift.lower()
+        if "1" in _s:
+            _emoji, _color, _glow, _border = "🟡", "#ffd700", "rgba(255,215,0,0.15)", "rgba(255,215,0,0.4)"
+        elif "3" in _s:
+            _emoji, _color, _glow, _border = "🔵", "#60a5fa", "rgba(96,165,250,0.15)", "rgba(96,165,250,0.4)"
+        else:
+            _emoji, _color, _glow, _border = "🟢", "#22c55e", "rgba(34,197,94,0.15)", "rgba(34,197,94,0.4)"
+        status_text  = f"{_emoji} {_html.escape(current_shift)}"
+        status_color = _color
+        glow_color   = _glow
+        border_color = _border
     else:
         status_text  = "⏳ Unassigned"
         status_color = "#a855f7"
@@ -1602,7 +1619,7 @@ st.markdown("""
   <div class="particle p3"></div><div class="particle p4"></div>
   <div class="particle p5"></div><div class="particle p6"></div>
   <h1>🚨 साइबर क्राइम हेल्पलाइन 1930</h1>
-  <div class="subtitle">✦ DUTY DATA  COLLECTION ✦</div>
+  <div class="subtitle">✦ ड्यूटी रोस्टर प्रबंधन प्रणाली ✦</div>
   <div class="header-badge"><span class="live-dot"></span>LIVE SYSTEM • ACTIVE</div>
 </div></div>
 """, unsafe_allow_html=True)
@@ -1653,14 +1670,56 @@ today_str         = now_ist().strftime("%d-%m-%Y")
 active_leave_mobs = get_active_leave_mobiles(avkaash_df)
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  DATE FILTER — सिर्फ latest/today का data दिखाओ
+# ══════════════════════════════════════════════════════════════════════════════
+def get_latest_shift(df):
+    """
+    Shift DataFrame से सिर्फ latest date का data return करो।
+    अगर today का data है तो today का, नहीं तो सबसे नई date का।
+    """
+    if df.empty:
+        return df
+    date_col = find_col(df.columns.tolist(), ["Shift_Date", "shift_date", "Date", "date"])
+    if not date_col:
+        return df
+    # string dates को normalize करो
+    df = df.copy()
+    df[date_col] = df[date_col].astype(str).str.strip()
+    # today का data है?
+    today_data = df[df[date_col] == today_str]
+    if not today_data.empty:
+        return today_data
+    # नहीं तो सबसे latest date का data दिखाओ
+    try:
+        dates = pd.to_datetime(df[date_col], format="%d-%m-%Y", errors="coerce")
+        df["_parsed_date"] = dates
+        latest = df["_parsed_date"].max()
+        if pd.isna(latest):
+            return df.drop(columns=["_parsed_date"])
+        result = df[df["_parsed_date"] == latest].drop(columns=["_parsed_date"])
+        return result
+    except:
+        return df
+
+# Filtered shift DataFrames — सिर्फ latest/today का data
+shift1_display = get_latest_shift(shift_dfs.get("Shift1", pd.DataFrame()))
+shift2_display = get_latest_shift(shift_dfs.get("Shift2", pd.DataFrame()))
+shift3_display = get_latest_shift(shift_dfs.get("Shift3", pd.DataFrame()))
+display_shift_dfs = {
+    "Shift1": shift1_display,
+    "Shift2": shift2_display,
+    "Shift3": shift3_display,
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  METRIC CARDS
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown('<div class="section-title">📊 सारांश डैशबोर्ड</div>', unsafe_allow_html=True)
 
 total_master = len(master_df)
-s1_count = len(shift_dfs.get("Shift1", pd.DataFrame()))
-s2_count = len(shift_dfs.get("Shift2", pd.DataFrame()))
-s3_count = len(shift_dfs.get("Shift3", pd.DataFrame()))
+s1_count = len(shift1_display)   # filtered: latest/today only
+s2_count = len(shift2_display)   # filtered: latest/today only
+s3_count = len(shift3_display)   # filtered: latest/today only
 leave_count = len(active_leave_mobs)
 
 c1,c2,c3,c4,c5 = st.columns(5)
@@ -1884,7 +1943,7 @@ shift_styles = [
 
 for idx, (s_label, card_cls, badge_cls, color) in enumerate(shift_styles):
     s_name = SHIFT_NAMES[idx]
-    s_df   = shift_dfs.get(s_name, pd.DataFrame())
+    s_df   = display_shift_dfs.get(s_name, pd.DataFrame())  # ← filtered: latest/today only
     with duty_cols[idx]:
         count = len(s_df)
         st.markdown(f"""
@@ -1978,7 +2037,7 @@ with tab2:
     if search_btn or (search_mobile and len(search_mobile.strip()) == 10):
         mob_q = search_mobile.strip()
         if mob_q.isdigit() and len(mob_q) == 10:
-            emp_data, err = ai_employee_search(mob_q, master_df, shift_dfs, audit_df, avkaash_df)
+            emp_data, err = ai_employee_search(mob_q, master_df, display_shift_dfs, audit_df, avkaash_df)
             if err:
                 st.markdown(f"""
                 <div style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.3);
@@ -2385,7 +2444,7 @@ with tab7:
 st.markdown(f"""
 <div class="footer">
   🚨 साइबर क्राइम हेल्पलाइन <strong>1930</strong> &nbsp;|&nbsp;
-  DUTY DATA  PDF SCRAP &nbsp;|&nbsp;
+  ड्यूटी रोस्टर प्रणाली &nbsp;|&nbsp;
   <span class="live-dot"></span>
   {now_ist().strftime('%d-%m-%Y %H:%M')} IST
 </div>
