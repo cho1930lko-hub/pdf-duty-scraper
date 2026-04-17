@@ -875,7 +875,7 @@ Format:
     return f"_{model_used} द्वारा सुझाव_\n\n{text}"
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  EMPLOYEE SEARCH
+#  EMPLOYEE SEARCH  — Audit_Log ही primary source है
 # ══════════════════════════════════════════════════════════════════════════════
 def ai_employee_search(mob, master_df, shift_dfs, audit_df, avkaash_df):
     mob = str(mob).strip()
@@ -884,72 +884,165 @@ def ai_employee_search(mob, master_df, shift_dfs, audit_df, avkaash_df):
         s = str(x).strip()
         return s[:-2] if s.endswith('.0') else s
 
-    emp_row = None
-    mob_col = find_col(master_df.columns.tolist(), MOBILE_ALIASES)
-    if mob_col and not master_df.empty:
-        res = master_df[master_df[mob_col].apply(clean_mob) == mob]
-        if not res.empty:
-            emp_row = res.iloc[0]
+    # ── Step-1: Audit_Log से कर्मचारी का सारा data ──────────────────────────
+    mob_col_audit = find_col(audit_df.columns.tolist(), MOBILE_ALIASES)
+    emp_audit     = pd.DataFrame()
+    if mob_col_audit and not audit_df.empty:
+        emp_audit = audit_df[audit_df[mob_col_audit].apply(clean_mob) == mob].copy()
 
-    if emp_row is None:
-        mob_col_audit = find_col(audit_df.columns.tolist(), MOBILE_ALIASES)
-        if mob_col_audit and not audit_df.empty:
-            a_res = audit_df[audit_df[mob_col_audit].apply(clean_mob) == mob]
-            if not a_res.empty:
-                last     = a_res.iloc[-1]
-                name_c   = find_col(last.index.tolist(), NAME_ALIASES)
-                desig_c  = find_col(last.index.tolist(), DESIG_ALIASES)
+    # अगर Audit में बिल्कुल भी नहीं मिला तो Master Data check करो
+    if emp_audit.empty:
+        mob_col_m = find_col(master_df.columns.tolist(), MOBILE_ALIASES)
+        if mob_col_m and not master_df.empty:
+            res_m = master_df[master_df[mob_col_m].apply(clean_mob) == mob]
+            if not res_m.empty:
+                r       = res_m.iloc[0]
+                name_c  = find_col(r.index.tolist(), NAME_ALIASES)
+                desig_c = find_col(r.index.tolist(), DESIG_ALIASES)
+                rem_c   = find_col(r.index.tolist(), REMARKS_ALIASES)
                 return {
-                    "name":str(last[name_c]).strip() if name_c else "—",
-                    "designation":str(last[desig_c]).strip() if desig_c else "—",
-                    "mobile":mob,"remarks":"","current_shift":"—","history":[],"leaves":[]
+                    "name"       : str(r[name_c]).strip()  if name_c  else "—",
+                    "designation": str(r[desig_c]).strip() if desig_c else "—",
+                    "mobile"     : mob,
+                    "remarks"    : str(r[rem_c]).strip()   if rem_c   else "",
+                    "current_shift": "—",
+                    "shift_totals" : {},
+                    "total_duty"   : 0,
+                    "history"      : [],
+                    "leaves"       : [],
+                    "total_leaves" : 0,
                 }, None
         return None, "कर्मचारी नहीं मिला"
 
-    name_c  = find_col(emp_row.index.tolist(), NAME_ALIASES)
-    desig_c = find_col(emp_row.index.tolist(), DESIG_ALIASES)
-    rem_c   = find_col(emp_row.index.tolist(), REMARKS_ALIASES)
-    name    = str(emp_row[name_c]).strip()  if name_c  else "—"
-    desig   = str(emp_row[desig_c]).strip() if desig_c else "—"
-    remarks = str(emp_row[rem_c]).strip()   if rem_c   else ""
+    # ── Step-2: Audit_Log से ही नाम / पद निकालो ────────────────────────────
+    name_c_a  = find_col(emp_audit.columns.tolist(), NAME_ALIASES)
+    desig_c_a = find_col(emp_audit.columns.tolist(), DESIG_ALIASES)
+    date_c_a  = find_col(emp_audit.columns.tolist(), ["Date","date"])
+    shift_c_a = find_col(emp_audit.columns.tolist(), ["Shift","shift"])
 
-    # ── Current shift: Audit_Log की latest date से ────────────────────────
+    name  = "—"
+    desig = "—"
+    if name_c_a:
+        names = emp_audit[name_c_a].dropna().astype(str).str.strip()
+        names = names[names != ""]
+        if not names.empty:
+            name = names.iloc[-1]
+    if desig_c_a:
+        desigs = emp_audit[desig_c_a].dropna().astype(str).str.strip()
+        desigs = desigs[desigs != ""]
+        if not desigs.empty:
+            desig = desigs.iloc[-1]
+
+    # Master_Data से remarks लेने की कोशिश
+    remarks = ""
+    mob_col_m = find_col(master_df.columns.tolist(), MOBILE_ALIASES)
+    if mob_col_m and not master_df.empty:
+        res_m = master_df[master_df[mob_col_m].apply(clean_mob) == mob]
+        if not res_m.empty:
+            rem_c = find_col(res_m.columns.tolist(), REMARKS_ALIASES)
+            if rem_c:
+                remarks = str(res_m.iloc[0][rem_c]).strip()
+            # Master से बेहतर नाम/पद मिले तो ले लो
+            nc2 = find_col(res_m.columns.tolist(), NAME_ALIASES)
+            dc2 = find_col(res_m.columns.tolist(), DESIG_ALIASES)
+            if nc2 and str(res_m.iloc[0][nc2]).strip():
+                name = str(res_m.iloc[0][nc2]).strip()
+            if dc2 and str(res_m.iloc[0][dc2]).strip():
+                desig = str(res_m.iloc[0][dc2]).strip()
+
+    # ── Step-3: Current shift (latest entry से) ──────────────────────────────
     current_shift = "—"
-    history       = []
-    mob_col_audit = find_col(audit_df.columns.tolist(), MOBILE_ALIASES)
-    if mob_col_audit and not audit_df.empty:
-        emp_audit = audit_df[audit_df[mob_col_audit].apply(clean_mob) == mob]
-        if not emp_audit.empty:
-            shift_c_a = find_col(emp_audit.columns.tolist(), ["Shift","shift"])
-            date_c_a  = find_col(emp_audit.columns.tolist(), ["Date","date"])
-            if shift_c_a:
-                if date_c_a:
-                    try:
-                        tmp = emp_audit.copy()
-                        tmp["_d"] = pd.to_datetime(tmp[date_c_a], format="%d-%m-%Y", errors="coerce")
-                        latest_row = tmp.sort_values("_d", ascending=False).iloc[0]
-                        current_shift = str(latest_row[shift_c_a]).strip() or "—"
-                    except:
-                        current_shift = str(emp_audit.iloc[-1][shift_c_a]).strip() or "—"
-                else:
-                    current_shift = str(emp_audit.iloc[-1][shift_c_a]).strip() or "—"
-            cols_avail = [c for c in ["Date","Shift","Designation","Remarks"] if c in emp_audit.columns]
-            history = emp_audit[cols_avail].tail(20).values.tolist()
+    if shift_c_a and date_c_a:
+        try:
+            tmp      = emp_audit.copy()
+            tmp["_d"] = pd.to_datetime(tmp[date_c_a], dayfirst=True, errors="coerce")
+            latest   = tmp.sort_values("_d", ascending=False).iloc[0]
+            current_shift = str(latest[shift_c_a]).strip() or "—"
+        except:
+            current_shift = str(emp_audit.iloc[-1][shift_c_a]).strip() or "—"
+    elif shift_c_a:
+        current_shift = str(emp_audit.iloc[-1][shift_c_a]).strip() or "—"
 
-    leaves = []
-    mob_col_av = find_col(avkaash_df.columns.tolist(), MOBILE_ALIASES)
+    # ── Step-4: Per-Shift duty count (unique dates × shift) ─────────────────
+    shift_totals = {}
+    total_duty   = 0
+    if shift_c_a:
+        # हर shift में unique dates count करो
+        for sh_name in SHIFT_NAMES:
+            sh_rows = emp_audit[emp_audit[shift_c_a].astype(str).str.strip() == sh_name]
+            if date_c_a:
+                unique_days = sh_rows[date_c_a].astype(str).str.strip()
+                unique_days = unique_days[unique_days != ""].nunique()
+            else:
+                unique_days = len(sh_rows)
+            if unique_days > 0:
+                shift_totals[sh_name] = unique_days
+                total_duty += unique_days
+    if total_duty == 0:
+        # Fallback: सिर्फ rows count
+        total_duty = len(emp_audit)
+
+    # ── Step-5: Duty history (latest 25 entries) ─────────────────────────────
+    history = []
+    if date_c_a:
+        try:
+            tmp2      = emp_audit.copy()
+            tmp2["_d"] = pd.to_datetime(tmp2[date_c_a], dayfirst=True, errors="coerce")
+            tmp2      = tmp2.sort_values("_d", ascending=False)
+        except:
+            tmp2 = emp_audit
+    else:
+        tmp2 = emp_audit
+
+    cols_avail = [c for c in [date_c_a, shift_c_a, desig_c_a,
+                               find_col(emp_audit.columns.tolist(), ["Remarks","remarks"])]
+                  if c]
+    if cols_avail:
+        history = tmp2[cols_avail].head(25).values.tolist()
+
+    # ── Step-6: Avkaash (अवकाश) data ─────────────────────────────────────────
+    leaves       = []
+    total_leaves = 0
+    mob_col_av   = find_col(avkaash_df.columns.tolist(), MOBILE_ALIASES)
     if mob_col_av and not avkaash_df.empty:
         emp_leave = avkaash_df[avkaash_df[mob_col_av].apply(clean_mob) == mob]
         if not emp_leave.empty:
-            leave_cols = [c for c in ["Leave_From","Leave_To","Leave_Reason","Status"] if c in emp_leave.columns]
+            leave_cols = [c for c in ["Leave_From","Leave_To","Leave_Reason","Sd_Days","Status"]
+                          if c in emp_leave.columns]
             leaves = emp_leave[leave_cols].values.tolist()
+            # Total leave days
+            sd_col = "Sd_Days"
+            if sd_col in emp_leave.columns:
+                try:
+                    total_leaves = int(emp_leave[sd_col].fillna(0).astype(float).sum())
+                except:
+                    total_leaves = len(emp_leave)
+            else:
+                # Leave_From → Leave_To से calculate करो
+                for _, lrow in emp_leave.iterrows():
+                    try:
+                        lf = pd.to_datetime(str(lrow.get("Leave_From","")), dayfirst=True)
+                        lt = pd.to_datetime(str(lrow.get("Leave_To","")),   dayfirst=True)
+                        total_leaves += max(1, (lt - lf).days + 1)
+                    except:
+                        total_leaves += 1
 
-    return {"name":name,"designation":desig,"mobile":mob,"remarks":remarks,
-            "current_shift":current_shift,"history":history,"leaves":leaves}, None
+    return {
+        "name"         : name,
+        "designation"  : desig,
+        "mobile"       : mob,
+        "remarks"      : remarks,
+        "current_shift": current_shift,
+        "shift_totals" : shift_totals,   # {"Shift1":20, "Shift2":5, ...}
+        "total_duty"   : total_duty,
+        "history"      : history,
+        "leaves"       : leaves,
+        "total_leaves" : total_leaves,
+    }, None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  RENDER EMPLOYEE CARD — पूरी तरह rebuilt, 3 अलग st.markdown calls
+#  RENDER EMPLOYEE CARD — Audit_Log based, shift-wise totals + leave summary
 # ══════════════════════════════════════════════════════════════════════════════
 def render_employee_card(emp_data, active_leave_mobs):
     mob           = str(emp_data.get("mobile",""))
@@ -957,6 +1050,9 @@ def render_employee_card(emp_data, active_leave_mobs):
     desig         = _html.escape(str(emp_data.get("designation","—")))
     remarks       = _html.escape(str(emp_data.get("remarks","")))
     current_shift = str(emp_data.get("current_shift","—"))
+    shift_totals  = emp_data.get("shift_totals", {})
+    total_duty    = emp_data.get("total_duty", 0)
+    total_leaves  = emp_data.get("total_leaves", 0)
 
     # ── Status & colors ──────────────────────────────────────────────────────
     if mob in active_leave_mobs:
@@ -992,7 +1088,7 @@ def render_employee_card(emp_data, active_leave_mobs):
             f'📌 {remarks}</span></div>'
         )
 
-    # ── 1. Top card ───────────────────────────────────────────────────────────
+    # ── 1. Top card (नाम / पद / मोबाइल / status) ─────────────────────────────
     st.markdown(f"""
 <div style="background:linear-gradient(135deg,rgba(13,27,62,0.97),rgba(26,45,90,0.82));
     border:1px solid {border_color};border-left:5px solid {status_color};border-radius:20px;
@@ -1012,66 +1108,156 @@ def render_employee_card(emp_data, active_leave_mobs):
         </div>
         <div style="background:rgba(0,0,0,0.4);border:1px solid {border_color};
             border-radius:16px;padding:16px 28px;text-align:center;min-width:140px;">
+            <div style="font-size:0.7rem;color:#7a92b8;margin-bottom:4px;letter-spacing:1px;text-transform:uppercase;">अंतिम शिफ्ट</div>
             <div style="font-size:1.05rem;font-weight:700;color:{status_color};">{status_text}</div>
         </div>
     </div>
 </div>
 """, unsafe_allow_html=True)
 
-    # ── 2. History table (अलग call) ────────────────────────────────────────
+    # ── 2. Shift-wise Duty Totals (बड़े metric cards) ─────────────────────────
+    SHIFT_CFG = {
+        "Shift1": ("🟡", "#ffd700", "rgba(255,215,0,0.15)", "rgba(255,215,0,0.35)"),
+        "Shift2": ("🟢", "#4ade80", "rgba(34,197,94,0.15)",  "rgba(34,197,94,0.35)"),
+        "Shift3": ("🔵", "#60a5fa", "rgba(96,165,250,0.15)", "rgba(96,165,250,0.35)"),
+    }
+
+    cards_html = ""
+    for sh, (em, clr, bg, brd) in SHIFT_CFG.items():
+        cnt = shift_totals.get(sh, 0)
+        cards_html += f"""
+<div style="flex:1;min-width:120px;background:{bg};border:1px solid {brd};
+    border-radius:16px;padding:18px 12px;text-align:center;">
+    <div style="font-size:1.3rem;margin-bottom:4px;">{em}</div>
+    <div style="font-family:'Rajdhani',monospace;font-size:2.4rem;font-weight:700;
+        color:{clr};line-height:1;">{cnt}</div>
+    <div style="font-size:0.72rem;color:#7a92b8;margin-top:4px;font-weight:600;">{sh} — दिन</div>
+</div>"""
+
+    # कुल + अवकाश
+    cards_html += f"""
+<div style="flex:1;min-width:120px;background:rgba(168,85,247,0.12);border:1px solid rgba(168,85,247,0.35);
+    border-radius:16px;padding:18px 12px;text-align:center;">
+    <div style="font-size:1.3rem;margin-bottom:4px;">📊</div>
+    <div style="font-family:'Rajdhani',monospace;font-size:2.4rem;font-weight:700;
+        color:#c084fc;line-height:1;">{total_duty}</div>
+    <div style="font-size:0.72rem;color:#7a92b8;margin-top:4px;font-weight:600;">कुल ड्यूटी दिन</div>
+</div>
+<div style="flex:1;min-width:120px;background:rgba(249,115,22,0.10);border:1px solid rgba(249,115,22,0.35);
+    border-radius:16px;padding:18px 12px;text-align:center;">
+    <div style="font-size:1.3rem;margin-bottom:4px;">🌴</div>
+    <div style="font-family:'Rajdhani',monospace;font-size:2.4rem;font-weight:700;
+        color:#fb923c;line-height:1;">{total_leaves}</div>
+    <div style="font-size:0.72rem;color:#7a92b8;margin-top:4px;font-weight:600;">कुल अवकाश दिन</div>
+</div>"""
+
+    st.markdown(f"""
+<div style="background:rgba(0,0,0,0.2);border:1px solid rgba(255,255,255,0.07);
+    border-radius:16px;padding:20px;margin-top:12px;">
+    <div style="font-size:0.78rem;color:#7a92b8;margin-bottom:14px;font-weight:700;letter-spacing:1px;
+        text-transform:uppercase;">📈 शिफ्ट-वार ड्यूटी सारांश (Audit Log आधारित)</div>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;">{cards_html}</div>
+</div>
+""", unsafe_allow_html=True)
+
+    # ── 3. Duty history table (latest 25, newest first) ───────────────────────
     history = emp_data.get("history", [])
     if history:
         rows_html = ""
-        for h in history[-10:]:
+        SHIFT_COLORS = {"shift1":"#ffd700","shift2":"#4ade80","shift3":"#60a5fa"}
+        for h in history:
             c0 = _html.escape(str(h[0])) if len(h) > 0 else ""
-            c1 = _html.escape(str(h[1])) if len(h) > 1 else ""
+            c1_raw = str(h[1]) if len(h) > 1 else ""
+            c1 = _html.escape(c1_raw)
             c2 = _html.escape(str(h[2])) if len(h) > 2 else ""
             c3 = _html.escape(str(h[3])) if len(h) > 3 else ""
+            sc = SHIFT_COLORS.get(c1_raw.lower().replace(" ",""), "#a0b8d8")
             rows_html += (
-                f"<tr>"
-                f"<td style='padding:4px 8px;color:#a0b8d8'>{c0}</td>"
-                f"<td style='padding:4px 8px;color:#60a5fa'>{c1}</td>"
-                f"<td style='padding:4px 8px;color:#4ade80'>{c2}</td>"
-                f"<td style='padding:4px 8px;color:#fbbf24;font-size:0.75rem'>{c3}</td>"
+                f"<tr style='border-bottom:1px solid rgba(255,255,255,0.04)'>"
+                f"<td style='padding:5px 10px;color:#a0b8d8;white-space:nowrap'>{c0}</td>"
+                f"<td style='padding:5px 10px;'><span style='background:rgba(0,0,0,0.3);"
+                f"border-radius:6px;padding:2px 10px;color:{sc};font-weight:700;font-size:0.8rem'>{c1}</span></td>"
+                f"<td style='padding:5px 10px;color:#4ade80;font-size:0.8rem'>{c2}</td>"
+                f"<td style='padding:5px 10px;color:#fbbf24;font-size:0.75rem'>{c3}</td>"
                 f"</tr>"
             )
         st.markdown(f"""
 <div style="background:rgba(0,0,0,0.2);border:1px solid rgba(255,255,255,0.07);
-    border-radius:14px;padding:16px;margin-top:10px;">
-    <div style="font-size:0.78rem;color:#7a92b8;margin-bottom:8px;">📅 पिछली duties (Audit Log):</div>
-    <table style="width:100%;border-collapse:collapse;font-size:0.8rem;">
-        <tr style="background:rgba(255,255,255,0.05)">
-            <th style="padding:4px 8px;text-align:left;color:#7a92b8">तारीख</th>
-            <th style="padding:4px 8px;text-align:left;color:#7a92b8">Shift</th>
-            <th style="padding:4px 8px;text-align:left;color:#7a92b8">पद</th>
-            <th style="padding:4px 8px;text-align:left;color:#7a92b8">Remarks</th>
-        </tr>
-        {rows_html}
+    border-radius:14px;padding:16px;margin-top:12px;">
+    <div style="font-size:0.78rem;color:#7a92b8;margin-bottom:10px;font-weight:700;letter-spacing:1px;
+        text-transform:uppercase;">📅 ड्यूटी इतिहास — Audit Log (नवीनतम {len(history)} रिकॉर्ड)</div>
+    <div style="overflow-x:auto;">
+    <table style="width:100%;border-collapse:collapse;font-size:0.82rem;">
+        <thead><tr style="background:rgba(255,255,255,0.06)">
+            <th style="padding:6px 10px;text-align:left;color:#7a92b8;font-weight:700">📅 तारीख</th>
+            <th style="padding:6px 10px;text-align:left;color:#7a92b8;font-weight:700">🔄 शिफ्ट</th>
+            <th style="padding:6px 10px;text-align:left;color:#7a92b8;font-weight:700">🏷️ पद</th>
+            <th style="padding:6px 10px;text-align:left;color:#7a92b8;font-weight:700">📌 Remarks</th>
+        </tr></thead>
+        <tbody>{rows_html}</tbody>
     </table>
+    </div>
 </div>
 """, unsafe_allow_html=True)
+    else:
+        st.markdown("""
+<div style="background:rgba(0,0,0,0.15);border:1px solid rgba(255,255,255,0.06);
+    border-radius:12px;padding:14px 18px;margin-top:12px;color:#7a92b8;font-size:0.85rem;">
+    📋 Audit Log में अभी कोई ड्यूटी रिकॉर्ड नहीं मिला।
+</div>""", unsafe_allow_html=True)
 
-    # ── 3. Leave history (अलग call) ────────────────────────────────────────
+    # ── 4. Leave history (date-wise, with days) ───────────────────────────────
     leaves = emp_data.get("leaves", [])
     if leaves:
-        leave_rows = ""
+        leave_rows_html = ""
         for lv in leaves:
-            l0 = _html.escape(str(lv[0])) if len(lv) > 0 else ""
-            l1 = _html.escape(str(lv[1])) if len(lv) > 1 else ""
-            l2 = _html.escape(str(lv[2])) if len(lv) > 2 else ""
-            l3 = _html.escape(str(lv[3])) if len(lv) > 3 else ""
-            leave_rows += (
-                f"<div style='font-size:0.82rem;color:#fb923c;padding:4px 0'>"
-                f"{l0} → {l1} | {l2} "
-                f"<span style='color:#fbbf24'>{l3}</span></div>"
-            )
+            # Expected cols: Leave_From, Leave_To, Leave_Reason, Sd_Days, Status
+            l_from   = _html.escape(str(lv[0])) if len(lv) > 0 else "—"
+            l_to     = _html.escape(str(lv[1])) if len(lv) > 1 else "—"
+            l_reason = _html.escape(str(lv[2])) if len(lv) > 2 else "—"
+            l_sd     = str(lv[3]) if len(lv) > 3 else "—"
+            l_status = _html.escape(str(lv[4])) if len(lv) > 4 else ""
+
+            # SD days badge
+            try:
+                sd_val = int(float(l_sd))
+                sd_badge = (f'<span style="background:rgba(249,115,22,0.2);border:1px solid rgba(249,115,22,0.5);'
+                            f'border-radius:12px;padding:2px 10px;color:#fb923c;font-weight:700;font-size:0.8rem;">'
+                            f'📅 {sd_val} दिन</span>')
+            except:
+                sd_badge = ""
+
+            # Status badge
+            status_clr = {"Active":"#4ade80","Upcoming":"#ffd700","Expired":"#94a3b8"}.get(l_status,"#a0b8d8")
+            status_badge = (f'<span style="background:rgba(0,0,0,0.3);border-radius:8px;padding:2px 8px;'
+                            f'color:{status_clr};font-size:0.75rem;font-weight:600;">{l_status}</span>'
+                            if l_status else "")
+
+            leave_rows_html += f"""
+<div style="display:flex;align-items:center;gap:12px;padding:8px 0;
+    border-bottom:1px solid rgba(255,255,255,0.05);flex-wrap:wrap;">
+    <span style="color:#fb923c;font-weight:700;font-size:0.85rem;white-space:nowrap;">
+        {l_from} → {l_to}
+    </span>
+    {sd_badge}
+    <span style="color:#a0b8d8;font-size:0.82rem;flex:1;min-width:100px;">{l_reason}</span>
+    {status_badge}
+</div>"""
+
         st.markdown(f"""
-<div style="background:rgba(249,115,22,0.1);border:1px solid rgba(249,115,22,0.25);
-    border-radius:10px;padding:10px 16px;margin-top:10px;">
-    <div style="font-size:0.78rem;color:#7a92b8;margin-bottom:6px;">🌴 अवकाश इतिहास:</div>
-    {leave_rows}
+<div style="background:rgba(249,115,22,0.08);border:1px solid rgba(249,115,22,0.25);
+    border-radius:14px;padding:16px 20px;margin-top:12px;">
+    <div style="font-size:0.78rem;color:#7a92b8;margin-bottom:10px;font-weight:700;letter-spacing:1px;
+        text-transform:uppercase;">🌴 अवकाश इतिहास — कुल {total_leaves} दिन ({len(leaves)} प्रविष्टियाँ)</div>
+    {leave_rows_html}
 </div>
 """, unsafe_allow_html=True)
+    else:
+        st.markdown("""
+<div style="background:rgba(0,0,0,0.12);border:1px solid rgba(255,255,255,0.05);
+    border-radius:12px;padding:12px 18px;margin-top:12px;color:#7a92b8;font-size:0.82rem;">
+    🌴 इस कर्मचारी का कोई अवकाश रिकॉर्ड नहीं मिला।
+</div>""", unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1501,8 +1687,62 @@ with tab3:
 # ── TAB 4: Avkaash ────────────────────────────────────────────────────────────
 with tab4:
     st.markdown('<div class="section-title">🌴 अवकाश प्रबंधन</div>', unsafe_allow_html=True)
+
     if not avkaash_df.empty:
-        st.dataframe(avkaash_df, use_container_width=True, hide_index=True, height=280)
+        # ── Enhanced display with calculated days ──────────────────────────
+        av_display = avkaash_df.copy()
+
+        # Sd_Days अगर नहीं है या 0 है तो From-To से calculate करो
+        def calc_days(row):
+            try:
+                sd = row.get("Sd_Days","")
+                if sd and str(sd).strip() not in ("", "0", "0.0"):
+                    return int(float(str(sd)))
+                lf = pd.to_datetime(str(row.get("Leave_From","")), dayfirst=True)
+                lt = pd.to_datetime(str(row.get("Leave_To","")),   dayfirst=True)
+                return max(1, (lt - lf).days + 1)
+            except:
+                return 0
+
+        av_display["दिन"] = avkaash_df.apply(calc_days, axis=1)
+
+        # Show enhanced table
+        name_c_av  = find_col(av_display.columns.tolist(), NAME_ALIASES)
+        mob_c_av   = find_col(av_display.columns.tolist(), MOBILE_ALIASES)
+        desig_c_av = find_col(av_display.columns.tolist(), DESIG_ALIASES)
+
+        show_cols = []
+        rename_av = {}
+        for c, label in [(mob_c_av,"📱 मोबाइल"),(name_c_av,"👤 नाम"),
+                         (desig_c_av,"🏷️ पद"),
+                         ("Leave_From","📅 से"),("Leave_To","📅 तक"),
+                         ("दिन","📆 दिन"),("Leave_Reason","कारण"),("Status","स्थिति")]:
+            if c and c in av_display.columns:
+                show_cols.append(c)
+                rename_av[c] = label
+
+        if show_cols:
+            st.dataframe(av_display[show_cols].rename(columns=rename_av),
+                         use_container_width=True, hide_index=True, height=280)
+        else:
+            st.dataframe(av_display, use_container_width=True, hide_index=True, height=280)
+
+        # Summary metrics
+        total_av_days = int(av_display["दिन"].sum())
+        active_cnt    = len(active_leave_mobs)
+        mc1, mc2, mc3 = st.columns(3)
+        for cc, ic, vv, ll, cls in [
+            (mc1,"📋",len(avkaash_df),"कुल प्रविष्टियाँ","card-blue"),
+            (mc2,"🌴",active_cnt,    "सक्रिय अवकाश","card-orange"),
+            (mc3,"📆",total_av_days, "कुल अवकाश दिन","card-purple")]:
+            with cc:
+                st.markdown(
+                    f'<div class="metric-card {cls}" style="padding:14px 10px;">'
+                    f'<span class="icon">{ic}</span>'
+                    f'<div class="val" style="font-size:2rem;">{vv}</div>'
+                    f'<div class="lbl">{ll}</div></div>',
+                    unsafe_allow_html=True)
+
         av1, _ = st.columns([1,3])
         with av1:
             st.download_button("⬇️ अवकाश Excel",
@@ -1511,7 +1751,7 @@ with tab4:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True)
     else:
-        st.info("कोई अवकाश record नहीं।")
+        st.info("कोई अवकाश record नहीं। नीचे से नया अवकाश दर्ज करें।")
 
     st.markdown("---")
     st.markdown("**🌴 नया अवकाश जोड़ें**")
