@@ -39,7 +39,7 @@ logger = logging.getLogger("DutyRoster")
 # ══════════════════════════════════════════════════════════════
 #  CONSTANTS & CONFIG
 # ══════════════════════════════════════════════════════════════
-SHEET_NAME  = "Crime Duty Sheet"
+SHEET_NAME  = "Cyber Crime Duty Sheet"
 IST_OFFSET  = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 
 HINDI_MONTHS = {
