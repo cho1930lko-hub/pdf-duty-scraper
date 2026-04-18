@@ -1003,12 +1003,13 @@ st.markdown("---")
 # ══════════════════════════════════════════════════════════════
 #  MAIN TABS
 # ══════════════════════════════════════════════════════════════
-tab_upload, tab_search, tab_master, tab_avkash, tab_audit = st.tabs([
+tab_upload, tab_search, tab_master, tab_avkash, tab_audit, tab_debug = st.tabs([
     "📂 PDF अपलोड",
     "🔍 कर्मचारी खोज",
     "👥 Master Data",
     "🌴 अवकाश",
     "📜 Audit Log",
+    "🔧 Debug",
 ])
 
 # ══════════════════════════════════════════════════════════════
@@ -1460,6 +1461,47 @@ with tab_audit:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True)
         st.caption(f"कुल records: {len(a_df)}")
+
+# ══════════════════════════════════════════════════════════════
+#  DEBUG TAB
+# ══════════════════════════════════════════════════════════════
+with tab_debug:
+    st.markdown("### 🔧 Secrets Debug")
+    st.markdown("यह tab सिर्फ testing के लिए है — बाद में हटा देंगे")
+    
+    # Show all secret keys (not values)
+    try:
+        all_keys = list(st.secrets.keys())
+        st.success(f"✅ Secrets में कुल keys: {len(all_keys)}")
+        st.write("**Top-level keys:**", all_keys)
+    except Exception as e:
+        st.error(f"Secrets error: {e}")
+    
+    # Check each key individually
+    for key_name in ["GROQ_API_KEY", "DEEPSEEK_API_KEY", "GEMINI_API_KEY", "passwords", "gcp_service_account"]:
+        try:
+            val = st.secrets.get(key_name, None)
+            if val:
+                if isinstance(val, str):
+                    st.success(f"✅ {key_name}: मिली — {val[:8]}...")
+                else:
+                    st.success(f"✅ {key_name}: मिली (dict/section)")
+            else:
+                st.error(f"❌ {key_name}: नहीं मिली")
+        except Exception as e:
+            st.error(f"❌ {key_name}: Error — {e}")
+    
+    # Check sections
+    st.markdown("**Sections check:**")
+    for section in ["groq", "deepseek", "gemini"]:
+        try:
+            sec = st.secrets.get(section, {})
+            if sec:
+                st.success(f"✅ [{section}] section मिला — keys: {list(sec.keys())}")
+            else:
+                st.warning(f"⚠️ [{section}] section नहीं मिला")
+        except Exception as e:
+            st.error(f"❌ [{section}]: {e}")
 
 # ── FOOTER ────────────────────────────────────────────────────
 st.markdown(f"""
