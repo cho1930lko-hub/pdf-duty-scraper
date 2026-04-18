@@ -39,7 +39,7 @@ logger = logging.getLogger("DutyRoster")
 # ══════════════════════════════════════════════════════════════
 #  CONSTANTS & CONFIG
 # ══════════════════════════════════════════════════════════════
-SHEET_NAME  = "Cyber Crime Duty Sheet"
+SHEET_NAME  = "Crime Duty Sheet"
 IST_OFFSET  = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 
 HINDI_MONTHS = {
@@ -274,11 +274,30 @@ ONLY JSON return करो, कोई extra text नहीं:
                 continue
         return None, "सभी AI providers fail हो गए"
 
+    @staticmethod
+    def _get_key(top_name, section_name, section_key="api_key"):
+        # Format 1: TOP_KEY = "val"
+        try:
+            v = st.secrets.get(top_name, "")
+            if v: return str(v).strip()
+        except: pass
+        # Format 2: [section]TOP_KEY = "val"
+        try:
+            v = st.secrets.get(section_name, {}).get(top_name, "")
+            if v: return str(v).strip()
+        except: pass
+        # Format 3: [section]api_key = "val"
+        try:
+            v = st.secrets.get(section_name, {}).get(section_key, "")
+            if v: return str(v).strip()
+        except: pass
+        return ""
+
     def _call_groq(self, content):
-        key = st.secrets.get("GROQ_API_KEY", "")
+        key = self._get_key("GROQ_API_KEY", "groq")
         if not key:
-            raise Exception("Groq key नहीं मिली")
-        r = requests.post(self.GROQ_URL, timeout=30,
+            raise Exception("Groq key नहीं मिली — secrets check करें")
+        r = requests.post(self.GROQ_URL, timeout=45,
             headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
             json={"model": "llama-3.3-70b-versatile",
                   "messages": [{"role": "system", "content": self.EXTRACT_PROMPT},
@@ -288,10 +307,10 @@ ONLY JSON return करो, कोई extra text नहीं:
         return r.json()["choices"][0]["message"]["content"]
 
     def _call_deepseek(self, content):
-        key = st.secrets.get("DEEPSEEK_API_KEY", "")
+        key = self._get_key("DEEPSEEK_API_KEY", "deepseek")
         if not key:
-            raise Exception("DeepSeek key नहीं मिली")
-        r = requests.post(self.DEEPSEEK_URL, timeout=30,
+            raise Exception("DeepSeek key नहीं मिली — secrets check करें")
+        r = requests.post(self.DEEPSEEK_URL, timeout=45,
             headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
             json={"model": "deepseek-chat",
                   "messages": [{"role": "system", "content": self.EXTRACT_PROMPT},
@@ -301,15 +320,15 @@ ONLY JSON return करो, कोई extra text नहीं:
         return r.json()["choices"][0]["message"]["content"]
 
     def _call_gemini(self, content):
-        key = st.secrets.get("GEMINI_API_KEY", "")
+        key = self._get_key("GEMINI_API_KEY", "gemini")
         if not key:
-            raise Exception("Gemini key नहीं मिली")
+            raise Exception("Gemini key नहीं मिली — secrets check करें")
         url = f"{self.GEMINI_URL}?key={key}"
-        r = requests.post(url, timeout=30,
-            json={"contents": [{"parts": [{"text": self.EXTRACT_PROMPT + "\n\n" + content}]}]})
+        r = requests.post(url, timeout=45,
+            json={"contents": [{"parts": [{"text": self.EXTRACT_PROMPT + chr(10) + content}]}]})
         r.raise_for_status()
         raw = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-        return raw.replace("```json","").replace("```","").strip()
+        return raw.replace('```json','').replace('```','').strip()
 
 
 # ══════════════════════════════════════════════════════════════
