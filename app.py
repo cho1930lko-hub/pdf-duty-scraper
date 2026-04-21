@@ -81,7 +81,7 @@ def _remarks_from_text(text: str) -> str:
     if any(x in t for x in [
         "SHIFT INCH", "SHIFT INCHARGE", "SHIFTINCHARGE",
         "SHIFT IN CHARGE", "INCHARGE", "IN-CHARGE",
-        "SHIFT INC", "S.INCH", "प्रभारी", "इन्चार्ज", "इंचार्ज"
+        "SHIFT INC", "S.INCH", "इन्चार्ज", "इंचार्ज"
     ]):
         return "Shift Incharge"
     # CHO — exact word boundary
