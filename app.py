@@ -1,15 +1,15 @@
 """
 ══════════════════════════════════════════════════════════════════
-  साइबर क्राइम हेल्पलाइन 1930 — ड्यूटी रोस्टर प्रणाली v6.0
-  
-  MAJOR CHANGES:
-  1. AI sirf Mobile No + "CHO" word extract karta hai PDF/Image se
-  2. Naam/Padnaam HAMESHA Master se aata hai
-  3. CFMC / Barrack duty → heading se detect hoti hai
-  4. Login page clear/beautiful
-  5. Duplicate detection before save
-  6. Naye number → sirf Master mein (naam baad mein bharenge)
-  7. Shift1/2/3 → Audit_Log ki sirf LATEST DATE ka data leti hain
+  साइबर क्राइम हेल्पलाइन 1930 — ड्यूटी रोस्टर प्रणाली v6.1
+
+  FIXES in v6.1:
+  1. CFMC / Barrack entries ab sahi upload hongi
+     — CFMC section mein CHO column ko ignore kiya
+     — naam khali ho tab bhi save hoga (mob based)
+  2. Duplicate warning sirf tab aayegi jab same mobile+date exist kare
+     — Save mein bhi duplicates auto-skip honge
+  3. prepare_staff_with_master — section_type se remarks pehle
+  4. parse_sections_from_text — heading line pe bhi mobile capture
 ══════════════════════════════════════════════════════════════════
 """
 
@@ -240,33 +240,12 @@ def get_shift_for_date(shift_df, date_str):
 
 # ══════════════════════════════════════════════════════════════
 #  AI — SIMPLIFIED: Sirf Mobile + CHO detect karo
-#  Naam/Padnaam HAMESHA Master se aata hai
 # ══════════════════════════════════════════════════════════════
-
-# PDF text se special sections detect karna
-SPECIAL_SECTION_KEYWORDS = {
-    "CFMC": ["cfmc", "सीएफएमसी", "cfmc room"],
-    "Barrack": ["बैरक", "barrack", "बैरक सुरक्षा", "barrack security"],
-    "Other Duty": ["अन्य", "other", "09.00 am", "08.00 am", "15.00 pm"],
-}
-
-def detect_section_from_heading(heading_text: str) -> str:
-    """Heading text se section type detect karo"""
-    t = heading_text.strip().lower()
-    if any(k in t for k in ["cfmc", "सीएफएमसी"]):
-        return "CFMC"
-    if any(k in t for k in ["बैरक", "barrack"]):
-        return "Barrack"
-    if any(k in t for k in ["09.00", "08.00", "15.00", "अन्य ड्यूटी", "other duty"]):
-        return "Other Duty"
-    return ""
-
 class AgenticAI:
     GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
     DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
     GEMINI_URL   = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
 
-    # ── SIMPLIFIED PROMPT: Sirf Mobile + CHO ──────────────────
     EXTRACT_PROMPT = """
 You are an Indian Police Duty Roster data extractor.
 From the given text, extract ONLY these two things for each staff member:
@@ -330,7 +309,6 @@ If you cannot find sections clearly, use this simpler format:
         })
 
     def extract_text_from_pdf(self, pdf_bytes):
-        """PDF se text extract karo"""
         text = ""
         if PDF_AVAILABLE:
             try:
@@ -354,7 +332,6 @@ If you cannot find sections clearly, use this simpler format:
         return text.strip()
 
     def extract_text_from_image(self, img_bytes):
-        """Image se text extract karo (OCR)"""
         text = ""
         if OCR_AVAILABLE:
             try:
@@ -365,7 +342,6 @@ If you cannot find sections clearly, use this simpler format:
             except:
                 pass
             try:
-                # Try as jpg if png failed
                 if not text:
                     doc = fitz.open(stream=img_bytes, filetype="jpg")
                     for page in doc:
@@ -376,24 +352,19 @@ If you cannot find sections clearly, use this simpler format:
         return text.strip()
 
     def extract_mobiles_directly(self, text: str) -> list:
-        """
-        Directly text se mobile numbers extract karo (regex)
-        Yeh AI se bhi reliable hai basic cases mein
-        """
-        # 10 digit numbers starting with 6,7,8,9
         pattern = r'\b([6-9]\d{9})\b'
         found = re.findall(pattern, text)
-        return list(dict.fromkeys(found))  # unique, order preserved
+        return list(dict.fromkeys(found))
 
+    # ══════════════════════════════════════════════════════════
+    #  FIX: parse_sections_from_text
+    #  CFMC/Barrack section mein CHO column ignore karo
+    #  Heading line mein bhi mobile capture karo
+    # ══════════════════════════════════════════════════════════
     def parse_sections_from_text(self, text: str) -> dict:
-        """
-        Text ko manually parse karo sections ke basis par.
-        Lines ko scan karo - heading detect karo - uske baad ke mobiles us section mein
-        """
         lines = text.split('\n')
-        sections = {}  # section_type → set of mobiles
+        sections = {}          # section_type → list of mobiles
         current_section = "CHO"  # default
-
         mobile_pattern = re.compile(r'\b([6-9]\d{9})\b')
 
         for line in lines:
@@ -401,75 +372,93 @@ If you cannot find sections clearly, use this simpler format:
             if not line_stripped:
                 continue
 
-            # Section heading detect karo
             line_lower = line_stripped.lower()
-            if any(k in line_lower for k in ["cfmc", "सीएफएमसी"]):
-                current_section = "CFMC"
-                continue
-            if any(k in line_lower for k in ["बैरक", "barrack"]):
-                current_section = "Barrack"
-                continue
-            if any(k in line_lower for k in ["09.00 am", "08.00 am", "15.00 pm", "अन्य ड्यूटी"]):
-                current_section = "Other Duty"
-                continue
-
-            # Is line mein mobile number hai?
             mobiles_in_line = mobile_pattern.findall(line_stripped)
 
-            # CHO check: agar "CHO" word hai is line mein
-            has_cho = bool(re.search(r'\bCHO\b', line_stripped, re.IGNORECASE))
+            # ── CFMC heading ──────────────────────────────────
+            if any(k in line_lower for k in ["cfmc", "सीएफएमसी", "cfmc room"]):
+                current_section = "CFMC"
+                # Heading line mein mobile bhi ho sakta hai — capture karo
+                for mob in mobiles_in_line:
+                    sections.setdefault("CFMC", [])
+                    if mob not in sections["CFMC"]:
+                        sections["CFMC"].append(mob)
+                continue
+
+            # ── Barrack heading ───────────────────────────────
+            if any(k in line_lower for k in ["बैरक", "barrack", "बैरक सुरक्षा", "barrack security"]):
+                current_section = "Barrack"
+                for mob in mobiles_in_line:
+                    sections.setdefault("Barrack", [])
+                    if mob not in sections["Barrack"]:
+                        sections["Barrack"].append(mob)
+                continue
+
+            # ── Other Duty heading ────────────────────────────
+            if any(k in line_lower for k in ["09.00 am", "08.00 am", "15.00 pm", "अन्य ड्यूटी", "other duty"]):
+                current_section = "Other Duty"
+                # Agar mobiles bhi hain heading line mein
+                for mob in mobiles_in_line:
+                    sections.setdefault("Other Duty", [])
+                    if mob not in sections["Other Duty"]:
+                        sections["Other Duty"].append(mob)
+                continue
+
+            # ── No mobile in line — skip ──────────────────────
+            if not mobiles_in_line:
+                continue
+
+            # ── Effective section determine karo ─────────────
+            # KEY FIX: CFMC/Barrack/Other Duty section mein
+            # CHO column dekhne ki zaroorat nahi — section wahi rahega
+            if current_section in ("CFMC", "Barrack", "Other Duty"):
+                effective_section = current_section
+            else:
+                # CHO/default section mein CHO flag se determine
+                has_cho = bool(re.search(r'\bCHO\b', line_stripped, re.IGNORECASE))
+                effective_section = "CHO" if has_cho else current_section
 
             for mob in mobiles_in_line:
-                # Agar CHO explicitly likha hai to CHO section
-                effective_section = "CHO" if has_cho else current_section
-                if effective_section not in sections:
-                    sections[effective_section] = []
+                sections.setdefault(effective_section, [])
                 if mob not in sections[effective_section]:
                     sections[effective_section].append(mob)
 
         return sections
 
     def extract_from_pdf(self, pdf_bytes, shift_hint="Shift1", dinank_hint=""):
-        """PDF se data extract karo"""
         text = self.extract_text_from_pdf(pdf_bytes)
-
         if not text:
             return None, "PDF से text नहीं निकला"
-
         self.log("Text Extract", "✅", f"{len(text)} chars")
 
-        # Method 1: Direct regex parsing (fast, no AI tokens)
         sections = self.parse_sections_from_text(text)
-        date_found = self._extract_date_from_text(text) or dinank_hint
+        date_found  = self._extract_date_from_text(text) or dinank_hint
         shift_found = self._extract_shift_from_text(text) or shift_hint
 
         if sections:
-            self.log("Direct Parse", "✅", f"{sum(len(v) for v in sections.values())} numbers found")
+            total = sum(len(v) for v in sections.values())
+            self.log("Direct Parse", "✅", f"{total} numbers found in {list(sections.keys())}")
             return self._build_result(sections, date_found, shift_found), None
 
-        # Method 2: AI fallback (agar direct parse nahi chala)
-        self.log("AI Fallback", "🔄", "Direct parse ne kuch nahi diya, AI try kar raha hai...")
+        self.log("AI Fallback", "🔄", "Direct parse ne kuch nahi diya...")
         result, err = self.ai_call_chain(f"Shift: {shift_hint}\nDate: {dinank_hint}\n\nText:\n{text[:3000]}")
         return result, err
 
     def extract_from_image(self, img_bytes, shift_hint="Shift1", dinank_hint=""):
-        """Image se data extract karo"""
         text = self.extract_text_from_image(img_bytes)
-
         if text:
-            sections = self.parse_sections_from_text(text)
+            sections   = self.parse_sections_from_text(text)
             date_found = self._extract_date_from_text(text) or dinank_hint
             shift_found = self._extract_shift_from_text(text) or shift_hint
             if sections:
                 return self._build_result(sections, date_found, shift_found), None
 
-        # AI se try karo
-        result, err = self.ai_call_chain(f"Shift: {shift_hint}\nDate: {dinank_hint}\n\nImage text:\n{text[:3000] if text else 'No text extracted from image'}")
+        result, err = self.ai_call_chain(
+            f"Shift: {shift_hint}\nDate: {dinank_hint}\n\n"
+            f"Image text:\n{text[:3000] if text else 'No text extracted from image'}")
         return result, err
 
     def _extract_date_from_text(self, text: str) -> str:
-        """Text se date DD-MM-YYYY format mein nikalo"""
-        # Format: 22.04.2026 ya 22-04-2026 ya 22/04/2026
         patterns = [
             r'(\d{1,2})[.\-/](\d{1,2})[.\-/](20\d{2})',
             r'(20\d{2})[.\-/](\d{1,2})[.\-/](\d{1,2})',
@@ -478,14 +467,13 @@ If you cannot find sections clearly, use this simpler format:
             m = re.search(pat, text)
             if m:
                 g = m.groups()
-                if len(g[0]) == 4:  # YYYY-MM-DD
+                if len(g[0]) == 4:
                     return f"{g[2].zfill(2)}-{g[1].zfill(2)}-{g[0]}"
-                else:  # DD-MM-YYYY
+                else:
                     return f"{g[0].zfill(2)}-{g[1].zfill(2)}-{g[2]}"
         return ""
 
     def _extract_shift_from_text(self, text: str) -> str:
-        """Text se shift detect karo"""
         t = text.lower()
         if "प्रथम पाली" in t or "first shift" in t or "shift1" in t:
             return "Shift1"
@@ -493,7 +481,6 @@ If you cannot find sections clearly, use this simpler format:
             return "Shift2"
         if "तृतीय पाली" in t or "third shift" in t or "shift3" in t:
             return "Shift3"
-        # Time-based detection
         if "07:00" in text or "07.00" in text:
             return "Shift1"
         if "14:00" in text or "14.00" in text:
@@ -503,7 +490,6 @@ If you cannot find sections clearly, use this simpler format:
         return ""
 
     def _build_result(self, sections: dict, dinank: str, shift: str) -> dict:
-        """Sections dict se final result banao"""
         staff = []
         for section_type, mobiles in sections.items():
             for mob in mobiles:
@@ -520,7 +506,6 @@ If you cannot find sections clearly, use this simpler format:
         }
 
     def ai_call_chain(self, content):
-        """AI providers chain"""
         for name, fn in [
             ("Groq",     self._call_groq),
             ("DeepSeek", self._call_deepseek),
@@ -531,7 +516,6 @@ If you cannot find sections clearly, use this simpler format:
                 raw  = fn(content)
                 data, err = safe_json(raw)
                 if data:
-                    # Normalize AI response
                     normalized = self._normalize_ai_response(data)
                     if normalized and normalized.get("staff"):
                         self.log(f"AI: {name}", "✅ सफल",
@@ -543,7 +527,6 @@ If you cannot find sections clearly, use this simpler format:
         return None, "सभी AI providers fail हो गए"
 
     def _normalize_ai_response(self, data: dict) -> dict:
-        """AI response ko standard format mein convert karo"""
         dinank = data.get("dinank", "")
         shift  = data.get("shift", "Shift1")
         staff  = []
@@ -625,28 +608,25 @@ If you cannot find sections clearly, use this simpler format:
 
 
 # ══════════════════════════════════════════════════════════════
-#  SAVE FUNCTION — Master se naam/padnaam lo
+#  FIX: prepare_staff_with_master
+#  section_type se remarks PEHLE determine karo
+#  naam khali ho — Master mein na ho — tab bhi process karo
 # ══════════════════════════════════════════════════════════════
 def prepare_staff_with_master(staff_list: list, master_lookup: dict) -> tuple:
     """
-    staff_list mein sirf mobile_no + cho_flag + section_type hai
-    Master se naam, padnaam, remarks fill karo
-    
+    staff_list: [{mobile_no, cho_flag, section_type}]
     Returns:
-      - final_rows: [(mob, naam, padnaam, remarks)] 
-      - new_mobiles: mobile numbers jo Master mein nahi hain
-      - duplicates: mobile numbers jo already hai (same day)
+      - final_rows: [(mob, naam, padnaam, remarks)]
+      - new_mobiles: Master mein nahi hain
     """
-    final_rows  = []
-    new_mobiles = []
+    final_rows    = []
+    new_mobiles   = []
     seen_in_batch = set()
 
     for s in staff_list:
         mob = clean_mobile(str(s.get("mobile_no", "")))
         if not mob or len(mob) != 10:
             continue
-
-        # Duplicate check within this batch
         if mob in seen_in_batch:
             continue
         seen_in_batch.add(mob)
@@ -654,31 +634,30 @@ def prepare_staff_with_master(staff_list: list, master_lookup: dict) -> tuple:
         section_type = s.get("section_type", "")
         cho_flag     = s.get("cho_flag", False)
 
+        # ── Remarks: section_type se PEHLE determine karo ────
+        if section_type == "CFMC":
+            remarks = "CFMC"
+        elif section_type == "Barrack":
+            remarks = "Barrack"
+        elif section_type == "Other Duty":
+            remarks = "Other Duty"
+        elif cho_flag or section_type == "CHO":
+            remarks = "CHO"
+        else:
+            remarks = section_type or "Other"
+
+        # ── Master se naam/padnaam lo ─────────────────────────
         if mob in master_lookup:
             ml      = master_lookup[mob]
             naam    = ml["naam"]
             padnaam = ml["padnaam"]
-            # REMARKS: section_type se determine karo
-            if section_type == "CFMC":
-                remarks = "CFMC"
-            elif section_type == "Barrack":
-                remarks = "Barrack"
-            elif section_type == "Other Duty":
-                remarks = "Other Duty"
-            elif cho_flag or section_type == "CHO":
-                remarks = "CHO"
-            else:
+            # Master remarks tabhi use karo jab section ne specific nahi diya
+            if not remarks or remarks == "Other":
                 remarks = ml["remarks"] or "Other"
         else:
-            # Naya employee — Master mein nahi hai
-            naam    = ""  # Baad mein bhara jaayega
+            # Naya number — naam/padnaam baad mein bhara jaayega
+            naam    = ""
             padnaam = ""
-            if section_type == "CFMC":
-                remarks = "CFMC"
-            elif cho_flag or section_type == "CHO":
-                remarks = "CHO"
-            else:
-                remarks = section_type or "Other"
             new_mobiles.append(mob)
 
         final_rows.append((mob, naam, padnaam, remarks))
@@ -688,7 +667,7 @@ def prepare_staff_with_master(staff_list: list, master_lookup: dict) -> tuple:
 
 def check_duplicates_in_sheet(ws_shift, dinank_str: str, mobiles_to_check: list) -> list:
     """
-    Shift sheet mein check karo ki yeh mobile + date already exist karta hai
+    Same mobile + same date already exist karta hai?
     Returns: list of duplicate mobile numbers
     """
     try:
@@ -707,27 +686,40 @@ def check_duplicates_in_sheet(ws_shift, dinank_str: str, mobiles_to_check: list)
         return []
 
 
+# ══════════════════════════════════════════════════════════════
+#  FIX: save_shift_and_audit
+#  1. naam khali ho tab bhi save karo (CFMC/Barrack)
+#  2. Duplicate entries auto-skip karein
+# ══════════════════════════════════════════════════════════════
 def save_shift_and_audit(shift_name, final_rows, dinank_str, master_lookup, new_mobiles):
     """
     final_rows: [(mob, naam, padnaam, remarks)]
-    Shift + Audit + Master (naye) mein save karo
     """
     sh        = get_sheet()
     ws_shift  = sh.worksheet(shift_name)
     ws_audit  = get_or_create_ws(sh, TAB_AUDIT, AUDIT_HEADERS)
     ws_master = sh.worksheet(TAB_MASTER)
 
+    # ── Already saved duplicates detect karo aur skip karein ─
+    already_saved = set(check_duplicates_in_sheet(
+        ws_shift, dinank_str, [r[0] for r in final_rows]
+    ))
+
     shift_rows = []
     audit_rows = []
 
     for mob, naam, padnaam, remarks in final_rows:
-        if not naam and mob not in new_mobiles:
-            continue  # Skip agar naam khali ho aur master mein nahi hai
+        # Sirf mob empty ho to skip — naam empty ho tab bhi save karo
+        if not mob:
+            continue
+        # Duplicate skip
+        if mob in already_saved:
+            continue
         row_data = [mob, naam, padnaam, remarks, dinank_str]
         shift_rows.append(row_data)
         audit_rows.append([mob, naam, padnaam, remarks, dinank_str, shift_name])
 
-    # Naye employees ko Master mein daalo (sirf mobile)
+    # ── Naye employees Master mein add karo ──────────────────
     new_master_rows = []
     all_master = ws_master.get_all_values()
     existing_in_master = set()
@@ -743,8 +735,8 @@ def save_shift_and_audit(shift_name, final_rows, dinank_str, master_lookup, new_
             new_master_rows.append([mob, "", "", "", "", "", "", "", "", ""])
             existing_in_master.add(mob)
 
-    if shift_rows:   append_rows_safe(ws_shift,  shift_rows)
-    if audit_rows:   append_rows_safe(ws_audit,  audit_rows)
+    if shift_rows:      append_rows_safe(ws_shift,  shift_rows)
+    if audit_rows:      append_rows_safe(ws_audit,  audit_rows)
     if new_master_rows: append_rows_safe(ws_master, new_master_rows)
 
     load_all_data.clear()
@@ -928,7 +920,7 @@ def search_employee(mob, master_df, audit_df, avkash_df):
 
 
 # ══════════════════════════════════════════════════════════════
-#  PAGE CONFIG & CSS  — Login page clear + beautiful
+#  PAGE CONFIG & CSS
 # ══════════════════════════════════════════════════════════════
 st.set_page_config(
     page_title="ड्यूटी रोस्टर | 1930",
@@ -978,10 +970,6 @@ html,body,[class*="css"]{
   font-size:.75rem;color:#a0c0e0;letter-spacing:3px;
   text-transform:uppercase;margin-bottom:28px;
 }
-
-/* Password input — clear white text */
-.login-wrap .stTextInput>div>div>input,
-.login-wrap input[type="password"],
 div[data-testid="stTextInput"] input[type="password"]{
   background:rgba(255,255,255,0.12)!important;
   border:2px solid rgba(0,212,255,.4)!important;
@@ -1003,10 +991,6 @@ div[data-testid="stTextInput"] input[type="password"]:focus{
   border-color:#00d4ff!important;
   background:rgba(255,255,255,0.16)!important;
   box-shadow:0 0 0 3px rgba(0,212,255,.2)!important;
-}
-.login-wrap .stTextInput label,.login-wrap .stTextInput label p{
-  color:#c0d8f0!important;font-size:.88rem!important;
-  font-weight:600!important;letter-spacing:1px!important;
 }
 
 /* ═══ HEADER ═══ */
@@ -1136,13 +1120,17 @@ div[data-testid="stTextInput"] input[type="password"]:focus{
 .rb-barrack{background:rgba(249,115,22,.15);border:1px solid rgba(249,115,22,.4);color:#fb923c;}
 .rb-other{background:rgba(122,146,184,.1);border:1px solid rgba(122,146,184,.2);color:#7a92b8;}
 
-/* ═══ DUPLICATE WARNING ═══ */
+/* ═══ ALERTS ═══ */
 .dup-warn{
   background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.4);
   border-radius:10px;padding:12px 16px;margin:8px 0;
 }
 .new-mob-info{
   background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.3);
+  border-radius:10px;padding:12px 16px;margin:8px 0;
+}
+.cfmc-info{
+  background:rgba(168,85,247,.08);border:1px solid rgba(168,85,247,.3);
   border-radius:10px;padding:12px 16px;margin:8px 0;
 }
 
@@ -1176,7 +1164,7 @@ div[data-testid="stTextInput"] input[type="password"]:focus{
 
 
 # ══════════════════════════════════════════════════════════════
-#  PASSWORD — Clear login page
+#  PASSWORD
 # ══════════════════════════════════════════════════════════════
 def check_password():
     if st.session_state.get("auth"):
@@ -1186,14 +1174,13 @@ def check_password():
 <div class="login-wrap">
   <div style="font-size:3rem;margin-bottom:10px;filter:drop-shadow(0 0 12px rgba(0,212,255,.5));">🚨</div>
   <div class="login-title">साइबर क्राइम 1930</div>
-  <div class="login-sub">ड्यूटी रोस्टर प्रणाली · v6.0</div>
+  <div class="login-sub">ड्यूटी रोस्टर प्रणाली · v6.1</div>
 </div>""", unsafe_allow_html=True)
 
     c1, c2, c3 = st.columns([1, 2, 1])
     with c2:
         st.markdown("""
 <style>
-/* Login specific overrides for clear visibility */
 div[data-testid="stTextInput"] input {
   background: rgba(255,255,255,0.15) !important;
   color: #ffffff !important;
@@ -1287,7 +1274,7 @@ with st.sidebar:
                 st.error(f"Error: {e}")
     st.markdown("---")
     st.caption(f"PDF: {'✅' if PDF_AVAILABLE else '❌'} | OCR: {'✅' if OCR_AVAILABLE else '❌'}")
-    st.caption("v6.0 — Master-First Logic ✅")
+    st.caption("v6.1 — CFMC/Barrack Fix ✅")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1368,7 +1355,7 @@ for col_,ic_,val_,lbl_,cls_ in [
 
 st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
 
-# Shift Display — Latest date ka data
+# Shift Display
 st.markdown('<div class="sec-title">📋 वर्तमान पाली — नवीनतम तारीख</div>', unsafe_allow_html=True)
 sc1, sc2, sc3 = st.columns(3)
 for col_,df_,lbl_,hdr_cls,dt_,tab_name in [
@@ -1406,19 +1393,18 @@ tab_upload,tab_search,tab_master,tab_avkash,tab_audit,tab_debug = st.tabs([
 
 # ── TAB 1: PDF/IMAGE UPLOAD ───────────────────────────────────
 with tab_upload:
-    st.markdown('<div class="sec-title">🤖 Agentic PDF/Image अपलोड — v6.0</div>',
+    st.markdown('<div class="sec-title">🤖 Agentic PDF/Image अपलोड — v6.1</div>',
                 unsafe_allow_html=True)
 
     st.markdown("""
 <div style="background:rgba(46,117,182,.08);border:1px solid rgba(46,117,182,.3);
   border-radius:12px;padding:14px 18px;margin-bottom:16px;font-size:.85rem;line-height:2;">
-<b style="color:#60a5fa;">🤖 v6.0 — Master-First Logic:</b><br>
-&nbsp;✅ <b>AI केवल Mobile Number + CHO word</b> detect करता है<br>
-&nbsp;✅ <b>नाम / पदनाम हमेशा Master Sheet से</b> आता है<br>
-&nbsp;✅ <b>CFMC / बैरक</b> — PDF heading से automatically detect<br>
-&nbsp;✅ <b>Duplicate check</b> — save से पहले दिखाएगा<br>
-&nbsp;✅ <b>नया Mobile</b> → सिर्फ Master में जाएगा (नाम आप भरेंगे)<br>
-&nbsp;✅ <b>AI tokens बचते हैं</b> — minimal AI use
+<b style="color:#60a5fa;">🤖 v6.1 — CFMC/Barrack Fix:</b><br>
+&nbsp;✅ <b>CFMC / बैरक entries</b> — अब सही upload होंगी (CHO column ignore होगा)<br>
+&nbsp;✅ <b>नाम/पदनाम Master Sheet से</b> — section_type से remarks override<br>
+&nbsp;✅ <b>Duplicate auto-skip</b> — same mobile+date पहले से हो तो skip होगा<br>
+&nbsp;✅ <b>नया Mobile notice</b> — सिर्फ तब जब Master में बिल्कुल नया हो<br>
+&nbsp;✅ <b>CFMC/Barrack नाम खाली</b> — tab bhi save hoga, baad mein bharen
 </div>""", unsafe_allow_html=True)
 
     up_c1, up_c2, up_c3 = st.columns(3)
@@ -1447,18 +1433,15 @@ with tab_upload:
         uploaded_file = st.file_uploader("🖼️ Duty Roster Image", type=["jpg","jpeg","png"],
                                          key="img_upload")
 
-    # Session state
-    if "parsed_result" not in st.session_state:
-        st.session_state.parsed_result = None
-    if "parsed_file_name" not in st.session_state:
-        st.session_state.parsed_file_name = None
+    if "parsed_result"    not in st.session_state: st.session_state.parsed_result    = None
+    if "parsed_file_name" not in st.session_state: st.session_state.parsed_file_name = None
 
     if uploaded_file is not None:
         if st.session_state.parsed_file_name != uploaded_file.name:
             st.session_state.parsed_result = None
 
         if st.session_state.parsed_result is None:
-            agent     = AgenticAI()
+            agent      = AgenticAI()
             file_bytes = uploaded_file.read()
             dinank_str = upload_date.strftime("%d-%m-%Y")
 
@@ -1500,21 +1483,25 @@ with tab_upload:
             # Master se naam/padnaam fill karo
             final_rows, new_mobiles = prepare_staff_with_master(staff_raw, master_lookup)
 
-            # Duplicate check
-            sh_temp    = get_sheet()
-            ws_temp    = sh_temp.worksheet(final_shift)
-            dup_mobs   = check_duplicates_in_sheet(
+            # ── Duplicate check ───────────────────────────────
+            sh_temp  = get_sheet()
+            ws_temp  = sh_temp.worksheet(final_shift)
+            dup_mobs = check_duplicates_in_sheet(
                 ws_temp, final_date, [r[0] for r in final_rows])
+            dup_set  = set(dup_mobs)
 
-            # Summary display
+            # ── Sections summary ──────────────────────────────
             sections_summary = {}
             for s in staff_raw:
                 stype = s.get("section_type", "Unknown")
                 sections_summary[stype] = sections_summary.get(stype, 0) + 1
 
-            sec_html = " | ".join(
-                f"<b style='color:#ffd700'>{_html.escape(k)}</b>:{v}"
+            sec_html = " &nbsp;|&nbsp; ".join(
+                f"<b style='color:#ffd700'>{_html.escape(k)}</b>: {v}"
                 for k, v in sections_summary.items())
+
+            # New mobs jo save honge (dup exclude)
+            new_to_save = [r for r in final_rows if r[0] not in dup_set]
 
             st.markdown(f"""
 <div style="background:rgba(30,58,122,.5);border:1px solid rgba(96,165,250,.3);
@@ -1524,13 +1511,14 @@ with tab_upload:
   </div>
   <div style="font-size:.85rem;color:#a0b8d8;">
     📱 <b style="color:#60a5fa">{len(final_rows)}</b> numbers मिले &nbsp;|&nbsp;
-    📅 <b style="color:#4ade80">{final_date}</b> &nbsp;|&nbsp;
-    📋 <b style="color:#ffd700">{SHIFT_LABELS[final_shift]}</b>
+    ✅ <b style="color:#4ade80">{len(new_to_save)}</b> save होंगे &nbsp;|&nbsp;
+    📅 <b style="color:#ffd700">{final_date}</b> &nbsp;|&nbsp;
+    📋 <b style="color:#c084fc">{SHIFT_LABELS[final_shift]}</b>
   </div>
   <div style="font-size:.78rem;color:var(--muted);margin-top:5px;">Sections → {sec_html}</div>
 </div>""", unsafe_allow_html=True)
 
-            # Duplicate warning
+            # ── Duplicate warning — sirf tab dikhao jab actual duplicates hon ──
             if dup_mobs:
                 dup_names = []
                 for dm in dup_mobs:
@@ -1540,45 +1528,59 @@ with tab_upload:
                         dup_names.append(dm)
                 st.markdown(f"""
 <div class="dup-warn">
-  <b style="color:#f87171;">⚠️ {len(dup_mobs)} Duplicate मिले</b> — इस तारीख का data पहले से है:<br>
-  <span style="color:#fca5a5;font-size:.85rem;">{', '.join(dup_names)}</span><br>
-  <span style="color:#a0b8d8;font-size:.78rem;">Save करने पर ये entries फिर से add होंगी।
-  अगर नहीं चाहते तो रुकें।</span>
+  <b style="color:#f87171;">⚠️ {len(dup_mobs)} पहले से Saved</b> — 
+  इस तारीख का data exist करता है (auto-skip होंगे):<br>
+  <span style="color:#fca5a5;font-size:.85rem;">{', '.join(dup_names)}</span>
 </div>""", unsafe_allow_html=True)
 
-            # New mobiles info
+            # ── CFMC/Barrack info ─────────────────────────────
+            cfmc_entries = [s for s in staff_raw if s.get("section_type") in ("CFMC","Barrack","Other Duty")]
+            if cfmc_entries:
+                cfmc_mobs = [s.get("mobile_no","") for s in cfmc_entries]
+                cfmc_names = []
+                for cm in cfmc_mobs:
+                    if cm in master_lookup:
+                        cfmc_names.append(f"{master_lookup[cm]['naam']} ({s.get('section_type','')})")
+                    else:
+                        cfmc_names.append(f"{cm} ({next((s.get('section_type','') for s in cfmc_entries if s.get('mobile_no')==cm), '')})")
+                st.markdown(f"""
+<div class="cfmc-info">
+  <b style="color:#c084fc;">🏢 {len(cfmc_entries)} CFMC/Barrack/Other entries detect हुईं</b><br>
+  <span style="color:#d8b4fe;font-size:.85rem;">{', '.join(cfmc_names[:10])}</span>
+</div>""", unsafe_allow_html=True)
+
+            # ── New mobiles info ──────────────────────────────
             if new_mobiles:
                 st.markdown(f"""
 <div class="new-mob-info">
   <b style="color:#4ade80;">➕ {len(new_mobiles)} नए Mobile Numbers</b> — Master में नहीं हैं:<br>
   <span style="color:#86efac;font-size:.85rem;">{', '.join(new_mobiles)}</span><br>
   <span style="color:#a0b8d8;font-size:.78rem;">
-  Save करने पर ये Master Sheet में add हो जाएंगे — नाम/पदनाम आप बाद में भर सकते हैं।</span>
+  Save करने पर ये Master Sheet में add होंगे — नाम/पदनाम आप बाद में भर सकते हैं।</span>
 </div>""", unsafe_allow_html=True)
 
-            # Preview table
+            # ── Preview table ─────────────────────────────────
             preview_data = []
             for mob, naam, padnaam, remarks in final_rows:
-                is_dup = "⚠️ DUP" if mob in dup_mobs else ""
-                is_new = "🆕 NEW" if mob in new_mobiles else ""
+                is_dup = "⏭️ SKIP" if mob in dup_set else ""
+                is_new = "🆕 NEW"  if mob in new_mobiles else ""
                 preview_data.append({
-                    "मोबाइल": mob,
-                    "नाम":    naam or "— (Master में नहीं)",
-                    "पदनाम":  padnaam or "—",
-                    "REMARKS": remarks,
-                    "Status":  is_dup or is_new or "✅",
+                    "मोबाइल":  mob,
+                    "नाम":     naam or "— (नाम बाद में)",
+                    "पदनाम":   padnaam or "—",
+                    "REMARKS":  remarks,
+                    "Status":   is_dup or is_new or "✅",
                 })
             st.dataframe(pd.DataFrame(preview_data),
-                         use_container_width=True, hide_index=True, height=250)
+                         use_container_width=True, hide_index=True, height=260)
 
             col_save, col_cancel = st.columns([1,1])
             with col_save:
-                if st.button(f"💾 {SHIFT_LABELS[final_shift]} Save करें",
-                             key="save_main"):
+                btn_label = (f"💾 {SHIFT_LABELS[final_shift]} Save ({len(new_to_save)} entries)")
+                if st.button(btn_label, key="save_main"):
                     with st.spinner("💾 Save हो रहा है..."):
                         try:
                             if hist_mode:
-                                # Historical — sirf Audit mein
                                 sh_   = get_sheet()
                                 ws_a_ = get_or_create_ws(sh_, TAB_AUDIT, AUDIT_HEADERS)
                                 ws_m_ = sh_.worksheet(TAB_MASTER)
@@ -1591,9 +1593,11 @@ with tab_upload:
                                                    for r in all_m_[1:] if mi_ < len(r)}
                                     except:
                                         pass
-                                a_rows_ = []
+                                a_rows_  = []
                                 nm_rows_ = []
                                 for mob, naam, padnaam, remarks in final_rows:
+                                    if mob in dup_set:
+                                        continue
                                     a_rows_.append([mob, naam, padnaam, remarks,
                                                     final_date, final_shift])
                                     if mob in new_mobiles and mob not in ex_mob_:
@@ -1607,9 +1611,10 @@ with tab_upload:
                                 count, new_count = save_shift_and_audit(
                                     final_shift, final_rows, final_date,
                                     master_lookup, new_mobiles)
-                                st.success(
-                                    f"✅ {count} कर्मचारी save हुए — "
-                                    f"{SHIFT_LABELS[final_shift]} | {final_date}")
+                                msg = f"✅ {count} कर्मचारी save हुए — {SHIFT_LABELS[final_shift]} | {final_date}"
+                                if dup_mobs:
+                                    msg += f" ({len(dup_mobs)} duplicate skip किए)"
+                                st.success(msg)
                                 if new_count:
                                     st.info(
                                         f"➕ {new_count} नए mobile Master में add किए — "
@@ -1906,7 +1911,7 @@ with tab_audit:
 
 # ── TAB 6: DEBUG ──────────────────────────────────────────────
 with tab_debug:
-    st.markdown("### 🔧 Debug Panel v6.0")
+    st.markdown("### 🔧 Debug Panel v6.1")
     try:
         st.success(f"✅ Secrets keys: {list(st.secrets.keys())}")
     except Exception as e:
@@ -1923,14 +1928,18 @@ with tab_debug:
             st.error(f"❌ {kn}: {e}")
 
     st.markdown("---")
-    st.markdown("**🔍 Mobile Regex Test**")
-    test_text = st.text_area("Test Text paste करें:", height=100, key="debug_text")
+    st.markdown("**🔍 Mobile Regex + Section Test**")
+    test_text = st.text_area("Test Text paste करें:", height=150, key="debug_text")
     if test_text:
         agent_test = AgenticAI()
-        mobs = agent_test.extract_mobiles_directly(test_text)
-        sections = agent_test.parse_sections_from_text(test_text)
+        mobs       = agent_test.extract_mobiles_directly(test_text)
+        sections   = agent_test.parse_sections_from_text(test_text)
+        date_found = agent_test._extract_date_from_text(test_text)
+        shift_found = agent_test._extract_shift_from_text(test_text)
         st.write(f"**Mobiles found ({len(mobs)}):** {mobs}")
         st.write(f"**Sections:** {sections}")
+        st.write(f"**Date:** {date_found or 'not found'}")
+        st.write(f"**Shift:** {shift_found or 'not found'}")
 
     st.markdown("---")
     st.markdown("**📊 Data Summary**")
@@ -1946,10 +1955,10 @@ st.markdown(f"""
 <div style="text-align:center;color:var(--muted);font-size:.72rem;padding:14px;
   border-top:1px solid rgba(255,255,255,.07);margin-top:24px;">
   🚨 साइबर क्राइम हेल्पलाइन <b>1930</b> &nbsp;|&nbsp;
-  ड्यूटी रोस्टर v6.0 &nbsp;|&nbsp;
+  ड्यूटी रोस्टर v6.1 &nbsp;|&nbsp;
   <span class="live-dot"></span>
   {now_ist().strftime('%d-%m-%Y %H:%M')} IST &nbsp;|&nbsp;
-  Master-First Logic ✅
+  CFMC/Barrack Fix ✅
 </div>""", unsafe_allow_html=True)
 
 if __name__ == "__main__":
