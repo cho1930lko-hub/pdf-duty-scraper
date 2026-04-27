@@ -1174,7 +1174,7 @@ def check_password():
 <div class="login-wrap">
   <div style="font-size:3rem;margin-bottom:10px;filter:drop-shadow(0 0 12px rgba(0,212,255,.5));">🚨</div>
   <div class="login-title">साइबर क्राइम 1930</div>
-  <div class="login-sub">ड्यूटी रोस्टर प्रणाली · v6.1</div>
+  <div class="login-sub">ड्यूटी रोस्टर प्रणाली · v7.0</div>
 </div>""", unsafe_allow_html=True)
 
     c1, c2, c3 = st.columns([1, 2, 1])
@@ -1274,7 +1274,7 @@ with st.sidebar:
                 st.error(f"Error: {e}")
     st.markdown("---")
     st.caption(f"PDF: {'✅' if PDF_AVAILABLE else '❌'} | OCR: {'✅' if OCR_AVAILABLE else '❌'}")
-    st.caption("v6.1 — CFMC/Barrack Fix ✅")
+    st.caption("v7.0 — Heatmap + Fairness + Swap + Camera ✅")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1385,13 +1385,350 @@ st.markdown("---")
 # ══════════════════════════════════════════════════════════════
 #  TABS
 # ══════════════════════════════════════════════════════════════
-tab_upload,tab_search,tab_master,tab_avkash,tab_audit,tab_debug = st.tabs([
-    "📂 PDF/Image अपलोड","🔍 कर्मचारी खोज",
-    "👥 Master Data","🌴 अवकाश","📜 Audit Log","🔧 Debug"
+# ── FEATURE 3: Auto Shift Detection from text ─────────────────
+def auto_detect_shift_and_date(text: str):
+    """
+    PDF/Image text se shift aur date auto detect karo.
+    Returns (shift_str, date_str, confidence)
+    """
+    shift_found = ""
+    date_found  = ""
+    confidence  = 0
+
+    t = text.lower()
+
+    # Shift detection — keywords + time patterns
+    shift_signals = {
+        "Shift1": ["प्रथम पाली", "first shift", "morning shift",
+                   "07:00", "07.00", "7:00 am", "7.00 am", "shift1",
+                   "प्रातः पाली", "morning"],
+        "Shift2": ["द्वितीय पाली", "second shift", "afternoon shift",
+                   "14:00", "14.00", "2:00 pm", "2.00 pm", "shift2",
+                   "दोपहर पाली"],
+        "Shift3": ["तृतीय पाली", "third shift", "night shift",
+                   "21:00", "21.00", "9:00 pm", "9.00 pm", "shift3",
+                   "रात्रि पाली", "night"],
+    }
+    shift_scores = {"Shift1": 0, "Shift2": 0, "Shift3": 0}
+    for sh, keywords in shift_signals.items():
+        for kw in keywords:
+            if kw in t:
+                shift_scores[sh] += 1
+
+    best_shift  = max(shift_scores, key=shift_scores.get)
+    best_score  = shift_scores[best_shift]
+    if best_score > 0:
+        shift_found = best_shift
+        confidence  = min(100, best_score * 30)
+
+    # Date detection
+    import re as _re
+    date_patterns = [
+        r'(\d{1,2})[.\-/](\d{1,2})[.\-/](20\d{2})',
+        r'(20\d{2})[.\-/](\d{1,2})[.\-/](\d{1,2})',
+        r'MORNING SHIFT\s+(\d{1,2})\.(\d{2})\.(\d{4})',
+        r'SHIFT\s+(\d{1,2})\.(\d{2})\.(\d{4})',
+    ]
+    for pat in date_patterns:
+        m = _re.search(pat, text, _re.IGNORECASE)
+        if m:
+            g = m.groups()
+            try:
+                if len(g[0]) == 4:
+                    date_found = f"{g[2].zfill(2)}-{g[1].zfill(2)}-{g[0]}"
+                else:
+                    date_found = f"{g[0].zfill(2)}-{g[1].zfill(2)}-{g[2]}"
+                confidence = min(100, confidence + 40)
+                break
+            except:
+                pass
+
+    # Filename se bhi date try karo
+    return shift_found, date_found, confidence
+
+
+# ── FEATURE 4: Attendance Heatmap data ───────────────────────
+def get_attendance_heatmap_data(audit_df, mob=None, days=60):
+    """
+    Last N days ka attendance heatmap data banao.
+    mob=None → sabka aggregate, mob=number → ek ka
+    Returns: {date_str: count_or_bool}
+    """
+    today = now_ist().date()
+    start = today - datetime.timedelta(days=days)
+
+    result = {}
+    # Initialize all dates
+    d = start
+    while d <= today:
+        result[d.strftime("%d-%m-%Y")] = 0
+        d += datetime.timedelta(days=1)
+
+    if audit_df.empty or "दिनांक" not in audit_df.columns:
+        return result
+
+    df = audit_df.copy()
+    if mob:
+        df = df[df["मो0न0"].apply(clean_mobile) == mob]
+
+    for _, row in df.iterrows():
+        try:
+            d_obj = datetime.datetime.strptime(str(row["दिनांक"]).strip(), "%d-%m-%Y").date()
+            if start <= d_obj <= today:
+                key = d_obj.strftime("%d-%m-%Y")
+                result[key] = result.get(key, 0) + 1
+        except:
+            pass
+    return result
+
+
+def render_heatmap_html(heatmap_data: dict, title="📅 Attendance Heatmap", single_emp=False) -> str:
+    """
+    GitHub-style heatmap HTML banao
+    single_emp=True → green/red (present/absent)
+    single_emp=False → color intensity by count
+    """
+    if not heatmap_data:
+        return ""
+
+    dates   = sorted(heatmap_data.keys(),
+                     key=lambda x: datetime.datetime.strptime(x, "%d-%m-%Y"))
+    max_val = max(heatmap_data.values()) if heatmap_data.values() else 1
+    max_val = max(max_val, 1)
+
+    # Group by week
+    weeks = []
+    week  = []
+    for ds in dates:
+        d = datetime.datetime.strptime(ds, "%d-%m-%Y")
+        week.append((ds, heatmap_data[ds]))
+        if d.weekday() == 6:  # Sunday
+            weeks.append(week)
+            week = []
+    if week:
+        weeks.append(week)
+
+    def get_color(val):
+        if single_emp:
+            return "#22c55e" if val > 0 else "#1a2d5a"
+        if val == 0:
+            return "#0d1b3e"
+        pct = val / max_val
+        if pct < 0.25:   return "#1e3a5f"
+        elif pct < 0.5:  return "#2E75B6"
+        elif pct < 0.75: return "#00d4ff"
+        else:            return "#ffd700"
+
+    def get_tooltip(ds, val):
+        d = datetime.datetime.strptime(ds, "%d-%m-%Y")
+        day_name = ["सोम","मंगल","बुध","गुरु","शुक्र","शनि","रवि"][d.weekday()]
+        if single_emp:
+            status = "✅ उपस्थित" if val > 0 else "❌ अनुपस्थित"
+            return f"{day_name} {ds}: {status}"
+        return f"{day_name} {ds}: {val} कर्मचारी"
+
+    cells_html = ""
+    for week in weeks:
+        cells_html += '<div style="display:flex;flex-direction:column;gap:3px;">'
+        for ds, val in week:
+            color   = get_color(val)
+            tooltip = get_tooltip(ds, val)
+            cells_html += (
+                f'<div style="width:14px;height:14px;border-radius:3px;'
+                f'background:{color};cursor:pointer;" title="{tooltip}"></div>')
+        cells_html += '</div>'
+
+    month_labels = ""
+    seen_months  = set()
+    for ds in dates[::7]:
+        d  = datetime.datetime.strptime(ds, "%d-%m-%Y")
+        mk = f"{d.month}-{d.year}"
+        if mk not in seen_months:
+            seen_months.add(mk)
+            month_labels += (
+                f'<span style="font-size:.65rem;color:#7a92b8;margin-right:8px;">'
+                f'{HINDI_MONTHS[d.month]}</span>')
+
+    legend_html = ""
+    if not single_emp:
+        for clr, lbl in [("#0d1b3e","0"),("#1e3a5f","कम"),
+                         ("#2E75B6","मध्यम"),("#00d4ff","अधिक"),("#ffd700","उच्च")]:
+            legend_html += (
+                f'<div style="display:flex;align-items:center;gap:4px;margin-right:10px;">'
+                f'<div style="width:12px;height:12px;border-radius:2px;background:{clr}"></div>'
+                f'<span style="font-size:.65rem;color:#7a92b8;">{lbl}</span></div>')
+
+    return f"""
+<div style="background:rgba(0,0,0,.3);border:1px solid rgba(255,255,255,.08);
+  border-radius:14px;padding:16px 20px;margin:10px 0;">
+  <div style="font-size:.8rem;font-weight:700;color:#e8f0ff;margin-bottom:10px;">{title}</div>
+  <div style="margin-bottom:6px;">{month_labels}</div>
+  <div style="display:flex;gap:3px;overflow-x:auto;padding-bottom:4px;">{cells_html}</div>
+  <div style="display:flex;align-items:center;margin-top:10px;flex-wrap:wrap;">{legend_html}</div>
+</div>"""
+
+
+# ── FEATURE 5: Shift Fairness Score ──────────────────────────
+def compute_fairness_scores(master_df, audit_df):
+    """
+    Har karmchari ka fairness score compute karo.
+    Returns DataFrame with fairness metrics.
+    """
+    if audit_df.empty or master_df.empty:
+        return pd.DataFrame()
+
+    master_lookup_local = get_master_lookup(master_df)
+
+    # Audit se counts
+    stats = {}
+    for _, row in audit_df.iterrows():
+        mob   = clean_mobile(row.get("मो0न0", ""))
+        shift = str(row.get("पाली", "")).strip()
+        if not mob or shift not in ("Shift1", "Shift2", "Shift3"):
+            continue
+        if mob not in stats:
+            stats[mob] = {"Shift1": 0, "Shift2": 0, "Shift3": 0, "total": 0}
+        stats[mob][shift] += 1
+        stats[mob]["total"] += 1
+
+    if not stats:
+        return pd.DataFrame()
+
+    rows = []
+    for mob, cnt in stats.items():
+        total = cnt["total"]
+        if total == 0:
+            continue
+        ml = master_lookup_local.get(mob, {"naam": mob, "padnaam": ""})
+
+        s1_pct = round(cnt["Shift1"] / total * 100)
+        s2_pct = round(cnt["Shift2"] / total * 100)
+        s3_pct = round(cnt["Shift3"] / total * 100)
+
+        # Fairness = 100 - std deviation from 33%
+        import math
+        ideal   = 33.33
+        std_dev = math.sqrt(((s1_pct - ideal)**2 + (s2_pct - ideal)**2 + (s3_pct - ideal)**2) / 3)
+        fairness_score = max(0, round(100 - std_dev))
+
+        # Dominant shift
+        dominant = max(("Shift1", s1_pct), ("Shift2", s2_pct), ("Shift3", s3_pct),
+                       key=lambda x: x[1])
+
+        rows.append({
+            "मो0न0":       mob,
+            "नाम":         ml["naam"],
+            "पदनाम":       ml["padnaam"],
+            "कुल ड्यूटी":  total,
+            "प्रथम %":     s1_pct,
+            "द्वितीय %":   s2_pct,
+            "तृतीय %":     s3_pct,
+            "Fairness":    fairness_score,
+            "dominant_shift": dominant[0],
+            "mob_raw":     mob,
+        })
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    df = df.sort_values("Fairness", ascending=True)
+    return df
+
+
+def render_fairness_bar(s1, s2, s3):
+    """Shift distribution bar render karo"""
+    return (
+        f'<div style="display:flex;height:12px;border-radius:6px;overflow:hidden;width:150px;">'
+        f'<div style="width:{s1}%;background:#ffd700;" title="प्रथम: {s1}%"></div>'
+        f'<div style="width:{s2}%;background:#4ade80;" title="द्वितीय: {s2}%"></div>'
+        f'<div style="width:{s3}%;background:#60a5fa;" title="तृतीय: {s3}%"></div>'
+        f'</div>')
+
+
+# ── FEATURE 10: Shift Swap ────────────────────────────────────
+def do_shift_swap(mob_a, mob_b, date_a, date_b, shift_a, shift_b, master_lookup):
+    """
+    Employee A aur B ki shift swap karo.
+    A: date_a pe shift_a → date_b pe shift_b
+    B: date_b pe shift_b → date_a pe shift_a
+    Returns: (success, message)
+    """
+    try:
+        sh = get_sheet()
+        ws_a = sh.worksheet(shift_a)
+        ws_b = sh.worksheet(shift_b)
+        ws_audit = get_or_create_ws(sh, TAB_AUDIT, AUDIT_HEADERS)
+
+        def find_and_remove(ws, mob, date_str):
+            all_vals = ws.get_all_values()
+            found_row = None
+            for i, row in enumerate(all_vals[1:], start=2):
+                if len(row) >= 5:
+                    if clean_mobile(str(row[0])) == mob and str(row[4]).strip() == date_str:
+                        found_row = (i, row)
+                        break
+            return found_row
+
+        # Find entries
+        entry_a = find_and_remove(ws_a, mob_a, date_a)
+        entry_b = find_and_remove(ws_b, mob_b, date_b)
+
+        if not entry_a:
+            return False, f"{mob_a} ka {date_a} pe {shift_a} mein record nahi mila"
+        if not entry_b:
+            return False, f"{mob_b} ka {date_b} pe {shift_b} mein record nahi mila"
+
+        row_a = entry_a[1]
+        row_b = entry_b[1]
+
+        # Delete old entries (update to empty or mark as swapped)
+        ws_a.update_cell(entry_a[0], 5, f"SWAPPED→{date_b}")
+        ws_b.update_cell(entry_b[0], 5, f"SWAPPED→{date_a}")
+
+        # Add swapped entries to correct sheets
+        ws_b_target = sh.worksheet(shift_b)
+        ws_a_target = sh.worksheet(shift_a)
+
+        new_row_a = [row_a[0], row_a[1], row_a[2], row_a[3], date_b]  # A → B's date
+        new_row_b = [row_b[0], row_b[1], row_b[2], row_b[3], date_a]  # B → A's date
+
+        append_rows_safe(ws_b_target, [new_row_a])
+        append_rows_safe(ws_a_target, [new_row_b])
+
+        # Audit entries
+        swap_note_a = f"SWAP: {mob_a}↔{mob_b} | {date_a}→{date_b}"
+        swap_note_b = f"SWAP: {mob_b}↔{mob_a} | {date_b}→{date_a}"
+        append_rows_safe(ws_audit, [
+            [row_a[0], row_a[1], row_a[2], swap_note_a, date_b, shift_b],
+            [row_b[0], row_b[1], row_b[2], swap_note_b, date_a, shift_a],
+        ])
+
+        load_all_data.clear()
+        naam_a = master_lookup.get(mob_a, {}).get("naam", mob_a)
+        naam_b = master_lookup.get(mob_b, {}).get("naam", mob_b)
+        return True, f"✅ Swap successful!\n{naam_a} ↔ {naam_b}"
+
+    except Exception as e:
+        return False, f"Swap error: {str(e)}"
+
+
+# ══════════════════════════════════════════════════════════════
+#  TABS — v7.0 (3 naye tabs added)
+# ══════════════════════════════════════════════════════════════
+tab_upload, tab_search, tab_heatmap, tab_fairness, tab_swap, \
+tab_master, tab_avkash, tab_audit, tab_debug = st.tabs([
+    "📂 PDF/Image अपलोड",
+    "🔍 कर्मचारी खोज",
+    "📅 Attendance Heatmap",
+    "⚖️ Fairness Score",
+    "🔄 Shift Swap",
+    "👥 Master Data",
+    "🌴 अवकाश",
+    "📜 Audit Log",
+    "🔧 Debug",
 ])
 
-
-# ── TAB 1: PDF/IMAGE UPLOAD ───────────────────────────────────
 with tab_upload:
     st.markdown('<div class="sec-title">🤖 Agentic PDF/Image अपलोड — v6.1</div>',
                 unsafe_allow_html=True)
@@ -1399,7 +1736,7 @@ with tab_upload:
     st.markdown("""
 <div style="background:rgba(46,117,182,.08);border:1px solid rgba(46,117,182,.3);
   border-radius:12px;padding:14px 18px;margin-bottom:16px;font-size:.85rem;line-height:2;">
-<b style="color:#60a5fa;">🤖 v6.1 — CFMC/Barrack Fix:</b><br>
+<b style="color:#60a5fa;">🤖 v7.0 — CFMC Fix + Auto-Detect + Camera:</b><br>
 &nbsp;✅ <b>CFMC / बैरक entries</b> — अब सही upload होंगी (CHO column ignore होगा)<br>
 &nbsp;✅ <b>नाम/पदनाम Master Sheet से</b> — section_type से remarks override<br>
 &nbsp;✅ <b>Duplicate auto-skip</b> — same mobile+date पहले से हो तो skip होगा<br>
@@ -1422,16 +1759,31 @@ with tab_upload:
             "📚 Historical Mode", value=False, key="hist_mode",
             help="पुराना data — Shift sheet नहीं बदलेगी, केवल Audit में जाएगा")
 
-    file_type = st.radio("📁 File Type", ["PDF", "Image (JPG/PNG)"],
+    file_type = st.radio("📁 File Type",
+                         ["PDF", "🖼️ Image (JPG/PNG)", "📷 Camera (Live Scan)"],
                          horizontal=True, key="file_type_radio")
 
     uploaded_file = None
     if file_type == "PDF":
         uploaded_file = st.file_uploader("📄 Duty Roster PDF", type=["pdf"],
                                          key="pdf_upload")
-    else:
+    elif file_type == "🖼️ Image (JPG/PNG)":
         uploaded_file = st.file_uploader("🖼️ Duty Roster Image", type=["jpg","jpeg","png"],
                                          key="img_upload")
+    else:
+        # 📷 Camera Scan — Feature 16
+        st.markdown("""
+<div style="background:rgba(0,212,255,.08);border:1px solid rgba(0,212,255,.3);
+  border-radius:10px;padding:12px 16px;margin-bottom:10px;font-size:.84rem;">
+  📷 <b style="color:#00d4ff;">Camera Live Scan</b> — फोन/लैपटॉप camera से
+  duty sheet की photo खींचें।<br>
+  <span style="color:var(--muted);font-size:.78rem;">
+  ध्यान दें: अच्छी रोशनी में साफ photo लें — text clearly visible होना चाहिए।</span>
+</div>""", unsafe_allow_html=True)
+        cam_img = st.camera_input("📷 Duty Sheet Scan करें", key="cam_input")
+        if cam_img:
+            uploaded_file = cam_img
+            file_type = "🖼️ Image (JPG/PNG)"  # treat as image
 
     if "parsed_result"    not in st.session_state: st.session_state.parsed_result    = None
     if "parsed_file_name" not in st.session_state: st.session_state.parsed_file_name = None
@@ -1444,6 +1796,32 @@ with tab_upload:
             agent      = AgenticAI()
             file_bytes = uploaded_file.read()
             dinank_str = upload_date.strftime("%d-%m-%Y")
+
+            # Feature 3: Auto-detect shift + date from text before full processing
+            if file_type == "PDF":
+                raw_text = agent.extract_text_from_pdf(file_bytes)
+            else:
+                raw_text = agent.extract_text_from_image(file_bytes)
+
+            auto_shift, auto_date, auto_conf = auto_detect_shift_and_date(raw_text or "")
+            if auto_shift and auto_conf >= 40:
+                conf_color = "#4ade80" if auto_conf >= 70 else "#ffd700"
+                st.markdown(f"""
+<div style="background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.3);
+  border-radius:10px;padding:10px 16px;margin-bottom:10px;
+  display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+  <span style="font-size:1.2rem;">🤖</span>
+  <div>
+    <b style="color:#4ade80;">Auto-Detected:</b>
+    <span style="color:#e8f0ff;margin-left:8px;">
+      {SHIFT_LABELS.get(auto_shift, auto_shift)}</span>
+    {"<span style='color:#ffd700;margin-left:8px;'>📅 "+auto_date+"</span>" if auto_date else ""}
+  </div>
+  <div style="margin-left:auto;">
+    <span style="font-size:.72rem;color:var(--muted);">Confidence: </span>
+    <b style="color:{conf_color};">{auto_conf}%</b>
+  </div>
+</div>""", unsafe_allow_html=True)
 
             with st.spinner("🔍 Mobile numbers extract हो रहे हैं..."):
                 if file_type == "PDF":
@@ -1633,6 +2011,7 @@ with tab_upload:
 
 
 # ── TAB 2: EMPLOYEE SEARCH ────────────────────────────────────
+
 with tab_search:
     st.markdown('<div class="sec-title">🔍 कर्मचारी खोज — मोबाइल नंबर से</div>',
                 unsafe_allow_html=True)
@@ -1784,6 +2163,8 @@ with tab_search:
 
 
 # ── TAB 3: MASTER DATA ────────────────────────────────────────
+
+# MASTER
 with tab_master:
     st.markdown('<div class="sec-title">👥 Master Data</div>', unsafe_allow_html=True)
     if master_df.empty:
@@ -1811,6 +2192,8 @@ with tab_master:
 
 
 # ── TAB 4: AVKASH ─────────────────────────────────────────────
+
+# AVKASH
 with tab_avkash:
     st.markdown('<div class="sec-title">🌴 अवकाश प्रबंधन</div>', unsafe_allow_html=True)
     if not avkash_df.empty:
@@ -1879,6 +2262,8 @@ with tab_avkash:
 
 
 # ── TAB 5: AUDIT LOG ─────────────────────────────────────────
+
+# AUDIT
 with tab_audit:
     st.markdown('<div class="sec-title">📜 Audit Log</div>', unsafe_allow_html=True)
     if audit_df.empty:
@@ -1910,6 +2295,8 @@ with tab_audit:
 
 
 # ── TAB 6: DEBUG ──────────────────────────────────────────────
+
+# DEBUG
 with tab_debug:
     st.markdown("### 🔧 Debug Panel v6.1")
     try:
@@ -1950,16 +2337,359 @@ with tab_debug:
     st.write(f"Shift3 latest: {s3_date} ({len(s3_latest_df)} rows)")
 
 
+# FOOTER
 # ── FOOTER ────────────────────────────────────────────────────
 st.markdown(f"""
 <div style="text-align:center;color:var(--muted);font-size:.72rem;padding:14px;
   border-top:1px solid rgba(255,255,255,.07);margin-top:24px;">
   🚨 साइबर क्राइम हेल्पलाइन <b>1930</b> &nbsp;|&nbsp;
-  ड्यूटी रोस्टर v6.1 &nbsp;|&nbsp;
+  ड्यूटी रोस्टर v7.0 &nbsp;|&nbsp;
   <span class="live-dot"></span>
   {now_ist().strftime('%d-%m-%Y %H:%M')} IST &nbsp;|&nbsp;
-  CFMC/Barrack Fix ✅
+  Heatmap ✅ Fairness ✅ Swap ✅ Camera ✅
 </div>""", unsafe_allow_html=True)
 
 if __name__ == "__main__":
     pass
+
+
+# ── TAB 3: ATTENDANCE HEATMAP ─────────────────────────────────
+with tab_heatmap:
+    st.markdown('<div class="sec-title">📅 Attendance Heatmap — उपस्थिति दृश्य</div>',
+                unsafe_allow_html=True)
+
+    hm_c1, hm_c2 = st.columns([2, 1])
+    with hm_c1:
+        hm_mode = st.radio("📊 View Mode",
+                           ["🏢 सभी कर्मचारी (Aggregate)", "👤 एक कर्मचारी"],
+                           horizontal=True, key="hm_mode")
+    with hm_c2:
+        hm_days = st.selectbox("⏳ अवधि", [30, 60, 90], index=1, key="hm_days",
+                               format_func=lambda x: f"अंतिम {x} दिन")
+
+    if "एक कर्मचारी" in hm_mode:
+        hm_mob = st.text_input("📱 मोबाइल नंबर", max_chars=10, key="hm_mob",
+                               placeholder="10 अंक डालें...")
+        mob_filter = clean_mobile(hm_mob) if hm_mob and len(hm_mob) >= 10 else None
+
+        if mob_filter and mob_filter in master_lookup:
+            ml_hm = master_lookup[mob_filter]
+            st.markdown(f"""
+<div style="display:inline-flex;align-items:center;gap:10px;
+  background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);
+  border-radius:8px;padding:8px 14px;">
+  <span>✅</span>
+  <b style="color:#4ade80;">{_html.escape(ml_hm['naam'])}</b>
+  <span style="color:var(--muted);font-size:.8rem;">{_html.escape(ml_hm['padnaam'])}</span>
+</div>""", unsafe_allow_html=True)
+
+        hmap_data = get_attendance_heatmap_data(audit_df, mob=mob_filter, days=hm_days)
+        emp_name  = master_lookup.get(mob_filter or "", {}).get("naam", mob_filter or "कर्मचारी")
+        title_hm  = f"📅 {emp_name} — उपस्थिति ({hm_days} दिन)"
+        html_hm   = render_heatmap_html(hmap_data, title=title_hm, single_emp=True)
+        if html_hm:
+            st.markdown(html_hm, unsafe_allow_html=True)
+
+        # Present/Absent count
+        present = sum(1 for v in hmap_data.values() if v > 0)
+        absent  = len(hmap_data) - present
+        pct     = round(present / len(hmap_data) * 100) if hmap_data else 0
+
+        hm_cols = st.columns(3)
+        for col_, ic_, val_, lbl_, cls_ in [
+            (hm_cols[0], "✅", present, "उपस्थित दिन", "sc-green"),
+            (hm_cols[1], "❌", absent,  "अनुपस्थित दिन", "sc-red"),
+            (hm_cols[2], "📊", f"{pct}%","उपस्थिति %", "sc-blue"),
+        ]:
+            with col_:
+                st.markdown(
+                    f'<div class="sum-card {cls_}"><span class="ic">{ic_}</span>'
+                    f'<div class="v">{val_}</div><div class="l">{lbl_}</div></div>',
+                    unsafe_allow_html=True)
+
+    else:
+        # Aggregate heatmap — sabka
+        hmap_data = get_attendance_heatmap_data(audit_df, mob=None, days=hm_days)
+        html_hm   = render_heatmap_html(
+            hmap_data,
+            title=f"📅 सभी कर्मचारी — ड्यूटी Heatmap ({hm_days} दिन)",
+            single_emp=False)
+        if html_hm:
+            st.markdown(html_hm, unsafe_allow_html=True)
+        else:
+            st.info("Audit data नहीं मिला।")
+
+        # Top attendance days
+        if hmap_data:
+            top_days = sorted(hmap_data.items(), key=lambda x: x[1], reverse=True)[:5]
+            st.markdown("**🏆 सबसे अधिक ड्यूटी वाले दिन:**")
+            for ds, cnt in top_days:
+                if cnt > 0:
+                    d_obj = datetime.datetime.strptime(ds, "%d-%m-%Y")
+                    day_name = ["सोमवार","मंगलवार","बुधवार","गुरुवार",
+                                "शुक्रवार","शनिवार","रविवार"][d_obj.weekday()]
+                    st.markdown(
+                        f'<div style="display:flex;align-items:center;gap:10px;'
+                        f'padding:6px 0;border-bottom:1px solid rgba(255,255,255,.05);">'
+                        f'<span style="color:#ffd700;font-weight:700;min-width:110px;">{ds}</span>'
+                        f'<span style="color:#7a92b8;font-size:.82rem;">{day_name}</span>'
+                        f'<div style="flex:1;background:rgba(46,117,182,.2);border-radius:4px;'
+                        f'height:8px;margin:0 10px;">'
+                        f'<div style="width:{min(100,cnt*4)}%;background:#2E75B6;'
+                        f'border-radius:4px;height:8px;"></div></div>'
+                        f'<span style="color:#60a5fa;font-weight:700;">{cnt}</span>'
+                        f'</div>', unsafe_allow_html=True)
+
+    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+    st.markdown("""
+<div style="font-size:.72rem;color:var(--muted);padding:8px 0;">
+  💡 <b>टिप:</b> हर वर्ग एक दिन है — hover करें date और count देखें।
+  गहरा रंग = अधिक ड्यूटी, हल्का रंग = कम ड्यूटी।
+</div>""", unsafe_allow_html=True)
+
+
+# ── TAB 4: SHIFT FAIRNESS SCORE ──────────────────────────────
+with tab_fairness:
+    st.markdown('<div class="sec-title">⚖️ Shift Fairness Score — पाली न्यायसंगतता</div>',
+                unsafe_allow_html=True)
+
+    st.markdown("""
+<div style="background:rgba(168,85,247,.08);border:1px solid rgba(168,85,247,.3);
+  border-radius:10px;padding:12px 16px;margin-bottom:14px;font-size:.84rem;">
+  ⚖️ <b style="color:#c084fc;">Fairness Score क्या है?</b><br>
+  <span style="color:#a0b8d8;">
+  100 = तीनों पालियाँ बराबर-बराबर (33%-33%-33%) &nbsp;|&nbsp;
+  कम score = किसी एक पाली में ज़्यादा duty &nbsp;|&nbsp;
+  <b style="color:#ffd700;">🟡 प्रथम</b>
+  <b style="color:#4ade80;">🟢 द्वितीय</b>
+  <b style="color:#60a5fa;">🔵 तृतीय</b>
+  </span>
+</div>""", unsafe_allow_html=True)
+
+    fair_df = compute_fairness_scores(master_df, audit_df)
+
+    if fair_df.empty:
+        st.info("Audit data नहीं मिला। PDF upload करने के बाद यहाँ data दिखेगा।")
+    else:
+        # Filters
+        fc1, fc2 = st.columns([2, 1])
+        with fc1:
+            fair_search = st.text_input("🔍 नाम खोजें", key="fair_search",
+                                        placeholder="नाम टाइप करें...")
+        with fc2:
+            fair_sort = st.selectbox("🔃 Sort करें",
+                                     ["Low Fairness पहले", "High Fairness पहले",
+                                      "कुल ड्यूटी (अधिक)", "नाम A-Z"],
+                                     key="fair_sort")
+
+        df_show = fair_df.copy()
+        if fair_search:
+            df_show = df_show[df_show["नाम"].str.contains(fair_search, case=False, na=False)]
+
+        if fair_sort == "High Fairness पहले":
+            df_show = df_show.sort_values("Fairness", ascending=False)
+        elif fair_sort == "कुल ड्यूटी (अधिक)":
+            df_show = df_show.sort_values("कुल ड्यूटी", ascending=False)
+        elif fair_sort == "नाम A-Z":
+            df_show = df_show.sort_values("नाम")
+        else:
+            df_show = df_show.sort_values("Fairness", ascending=True)
+
+        # Summary stats
+        avg_fair = round(df_show["Fairness"].mean()) if not df_show.empty else 0
+        low_fair = df_show[df_show["Fairness"] < 50]
+        dom_s3   = df_show[df_show["dominant_shift"] == "Shift3"]
+
+        fsum_cols = st.columns(4)
+        for col_, ic_, val_, lbl_, cls_ in [
+            (fsum_cols[0], "👥", len(df_show),    "कुल कर्मचारी",   "sc-blue"),
+            (fsum_cols[1], "⚖️", avg_fair,          "औसत Fairness",  "sc-green"),
+            (fsum_cols[2], "⚠️", len(low_fair),    "Low Fairness (<50)", "sc-red"),
+            (fsum_cols[3], "🌙", len(dom_s3),      "Night Shift Dominant", "sc-purple"),
+        ]:
+            with col_:
+                st.markdown(
+                    f'<div class="sum-card {cls_}" style="margin-bottom:12px;">'
+                    f'<span class="ic">{ic_}</span>'
+                    f'<div class="v">{val_}</div>'
+                    f'<div class="l">{lbl_}</div></div>',
+                    unsafe_allow_html=True)
+
+        # Table
+        rows_html = ""
+        for _, row in df_show.iterrows():
+            score = row["Fairness"]
+            sc_color = ("#ef4444" if score < 40 else
+                        "#ffd700" if score < 70 else "#22c55e")
+            bar_html = render_fairness_bar(row["प्रथम %"], row["द्वितीय %"], row["तृतीय %"])
+            dom_sh   = row["dominant_shift"]
+            dom_clr  = {"Shift1":"#ffd700","Shift2":"#4ade80","Shift3":"#60a5fa"}.get(dom_sh,"#a0b8d8")
+            rows_html += f"""
+<tr style="border-bottom:1px solid rgba(255,255,255,.04);">
+  <td style="padding:8px 10px;color:#e8f0ff;font-weight:600;">{_html.escape(str(row['नाम']))}</td>
+  <td style="padding:8px 10px;color:#7a92b8;font-size:.8rem;">{_html.escape(str(row['पदनाम']))}</td>
+  <td style="padding:8px 10px;text-align:center;font-weight:700;color:#60a5fa;">{int(row['कुल ड्यूटी'])}</td>
+  <td style="padding:8px 10px;">{bar_html}<div style="display:flex;gap:6px;margin-top:4px;font-size:.68rem;color:#7a92b8;">
+    <span style="color:#ffd700;">{row['प्रथम %']}%</span>
+    <span style="color:#4ade80;">{row['द्वितीय %']}%</span>
+    <span style="color:#60a5fa;">{row['तृतीय %']}%</span>
+  </div></td>
+  <td style="padding:8px 10px;text-align:center;">
+    <span style="font-family:'Space Mono',monospace;font-size:1rem;font-weight:700;color:{sc_color};">{score}</span>
+    <div style="font-size:.62rem;color:{sc_color};">{'⭐ Fair' if score>=70 else '⚠️ Unfair' if score<40 else '〰️ Okay'}</div>
+  </td>
+  <td style="padding:8px 10px;">
+    <span style="background:rgba(0,0,0,.3);border-radius:6px;padding:2px 8px;
+      color:{dom_clr};font-size:.75rem;font-weight:700;">
+      {SHIFT_LABELS.get(dom_sh, dom_sh)}
+    </span>
+  </td>
+</tr>"""
+
+        st.markdown(f"""
+<div style="overflow-x:auto;border:1px solid rgba(255,255,255,.07);border-radius:12px;">
+<table style="width:100%;border-collapse:collapse;font-size:.83rem;">
+  <thead>
+    <tr style="background:rgba(255,255,255,.06);">
+      <th style="padding:10px;text-align:left;color:var(--muted);">👤 नाम</th>
+      <th style="padding:10px;text-align:left;color:var(--muted);">🏷️ पदनाम</th>
+      <th style="padding:10px;text-align:center;color:var(--muted);">📅 कुल</th>
+      <th style="padding:10px;text-align:left;color:var(--muted);">📊 पाली वितरण</th>
+      <th style="padding:10px;text-align:center;color:var(--muted);">⚖️ Score</th>
+      <th style="padding:10px;text-align:left;color:var(--muted);">🔝 Dominant</th>
+    </tr>
+  </thead>
+  <tbody>{rows_html}</tbody>
+</table>
+</div>""", unsafe_allow_html=True)
+
+        # Download
+        export_df = df_show[["नाम","पदनाम","कुल ड्यूटी","प्रथम %","द्वितीय %","तृतीय %","Fairness"]].copy()
+        fc_dl, _ = st.columns([1, 3])
+        with fc_dl:
+            st.download_button("⬇️ Fairness Excel",
+                               data=df_to_excel(export_df, "Fairness"),
+                               file_name=f"Fairness_{t_str}.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               use_container_width=True,
+                               key="dl_fairness")
+
+
+# ── TAB 5: SHIFT SWAP ────────────────────────────────────────
+with tab_swap:
+    st.markdown('<div class="sec-title">🔄 Shift Swap — पाली अदला-बदली</div>',
+                unsafe_allow_html=True)
+
+    st.markdown("""
+<div style="background:rgba(0,212,255,.08);border:1px solid rgba(0,212,255,.3);
+  border-radius:10px;padding:12px 16px;margin-bottom:14px;font-size:.84rem;line-height:1.9;">
+  🔄 <b style="color:#00d4ff;">Shift Swap कैसे काम करता है?</b><br>
+  <span style="color:#a0b8d8;">
+  दो कर्मचारियों का मोबाइल, तारीख और पाली भरें → दोनों की duty automatically swap हो जाएगी।<br>
+  दोनों Shift sheet + Audit Log में record update होगा।
+  </span>
+</div>""", unsafe_allow_html=True)
+
+    sw_c1, sw_c2 = st.columns(2)
+
+    with sw_c1:
+        st.markdown("""<div style="background:rgba(255,215,0,.08);border:1px solid rgba(255,215,0,.25);
+  border-radius:10px;padding:14px;">
+  <div style="color:#ffd700;font-weight:700;margin-bottom:10px;">👤 कर्मचारी A</div>""",
+                    unsafe_allow_html=True)
+        sw_mob_a  = st.text_input("📱 Mobile A", max_chars=10, key="sw_mob_a")
+        sw_date_a = st.date_input("📅 तारीख A", key="sw_date_a", value=now_ist().date())
+        sw_sh_a   = st.selectbox("📋 पाली A", ["Shift1","Shift2","Shift3"],
+                                  format_func=lambda x: SHIFT_LABELS[x], key="sw_sh_a")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        if sw_mob_a and clean_mobile(sw_mob_a) in master_lookup:
+            ml_a = master_lookup[clean_mobile(sw_mob_a)]
+            st.markdown(f"""<div style="margin-top:8px;padding:8px 12px;
+  background:rgba(255,215,0,.1);border-radius:8px;border:1px solid rgba(255,215,0,.3);">
+  <b style="color:#ffd700;">{_html.escape(ml_a['naam'])}</b>
+  <span style="color:var(--muted);font-size:.8rem;margin-left:8px;">{_html.escape(ml_a['padnaam'])}</span>
+</div>""", unsafe_allow_html=True)
+
+    with sw_c2:
+        st.markdown("""<div style="background:rgba(96,165,250,.08);border:1px solid rgba(96,165,250,.25);
+  border-radius:10px;padding:14px;">
+  <div style="color:#60a5fa;font-weight:700;margin-bottom:10px;">👤 कर्मचारी B</div>""",
+                    unsafe_allow_html=True)
+        sw_mob_b  = st.text_input("📱 Mobile B", max_chars=10, key="sw_mob_b")
+        sw_date_b = st.date_input("📅 तारीख B", key="sw_date_b", value=now_ist().date())
+        sw_sh_b   = st.selectbox("📋 पाली B", ["Shift1","Shift2","Shift3"],
+                                  format_func=lambda x: SHIFT_LABELS[x], key="sw_sh_b")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        if sw_mob_b and clean_mobile(sw_mob_b) in master_lookup:
+            ml_b = master_lookup[clean_mobile(sw_mob_b)]
+            st.markdown(f"""<div style="margin-top:8px;padding:8px 12px;
+  background:rgba(96,165,250,.1);border-radius:8px;border:1px solid rgba(96,165,250,.3);">
+  <b style="color:#60a5fa;">{_html.escape(ml_b['naam'])}</b>
+  <span style="color:var(--muted);font-size:.8rem;margin-left:8px;">{_html.escape(ml_b['padnaam'])}</span>
+</div>""", unsafe_allow_html=True)
+
+    # Preview swap
+    if (sw_mob_a and sw_mob_b and
+            clean_mobile(sw_mob_a) in master_lookup and
+            clean_mobile(sw_mob_b) in master_lookup):
+        ml_a_p = master_lookup[clean_mobile(sw_mob_a)]
+        ml_b_p = master_lookup[clean_mobile(sw_mob_b)]
+        da_str = sw_date_a.strftime("%d-%m-%Y")
+        db_str = sw_date_b.strftime("%d-%m-%Y")
+        st.markdown(f"""
+<div style="background:rgba(0,0,0,.3);border:1px solid rgba(255,255,255,.1);
+  border-radius:12px;padding:16px;margin:14px 0;text-align:center;">
+  <div style="font-size:.8rem;color:var(--muted);margin-bottom:10px;">📋 Swap Preview</div>
+  <div style="display:flex;align-items:center;justify-content:center;gap:16px;flex-wrap:wrap;">
+    <div style="text-align:center;">
+      <div style="color:#ffd700;font-weight:700;">{_html.escape(ml_a_p['naam'])}</div>
+      <div style="color:#7a92b8;font-size:.78rem;">{da_str} · {SHIFT_LABELS[sw_sh_a]}</div>
+    </div>
+    <div style="font-size:1.8rem;">⇄</div>
+    <div style="text-align:center;">
+      <div style="color:#60a5fa;font-weight:700;">{_html.escape(ml_b_p['naam'])}</div>
+      <div style="color:#7a92b8;font-size:.78rem;">{db_str} · {SHIFT_LABELS[sw_sh_b]}</div>
+    </div>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+    sw_btn_col, _ = st.columns([1, 2])
+    with sw_btn_col:
+        if st.button("🔄 Swap Confirm करें", key="do_swap", use_container_width=True):
+            mob_a_c = clean_mobile(sw_mob_a) if sw_mob_a else ""
+            mob_b_c = clean_mobile(sw_mob_b) if sw_mob_b else ""
+            if not (mob_a_c and mob_b_c and len(mob_a_c)==10 and len(mob_b_c)==10):
+                st.warning("⚠️ दोनों valid 10-digit mobile numbers डालें।")
+            elif mob_a_c == mob_b_c:
+                st.warning("⚠️ दोनों mobile numbers अलग होने चाहिए।")
+            else:
+                with st.spinner("🔄 Swap हो रहा है..."):
+                    ok, msg = do_shift_swap(
+                        mob_a_c, mob_b_c,
+                        sw_date_a.strftime("%d-%m-%Y"),
+                        sw_date_b.strftime("%d-%m-%Y"),
+                        sw_sh_a, sw_sh_b,
+                        master_lookup)
+                if ok:
+                    st.success(msg)
+                    st.balloons()
+                else:
+                    st.error(f"❌ {msg}")
+
+    # Recent swaps from audit
+    st.markdown("---")
+    st.markdown("**📜 हाल के Swaps (Audit से)**")
+    if not audit_df.empty and "REMARKS" in audit_df.columns:
+        swap_records = audit_df[
+            audit_df["REMARKS"].astype(str).str.startswith("SWAP:", na=False)
+        ].tail(10)
+        if not swap_records.empty:
+            st.dataframe(swap_records[["नाम","REMARKS","दिनांक","पाली"]],
+                         use_container_width=True, hide_index=True)
+        else:
+            st.info("अभी कोई swap record नहीं।")
+    else:
+        st.info("Audit data नहीं मिला।")
+
